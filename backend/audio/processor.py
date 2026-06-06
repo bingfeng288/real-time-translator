@@ -1,17 +1,156 @@
 """
 音频处理器
-负责音频格式转换、VAD 静音检测、音频分块
+负责音频格式转换、VAD 静音检测、持久化流式解码
 """
 
-import io
 import subprocess
-import tempfile
-import os
-from typing import Optional
+import threading
+import time
+from typing import Optional, Callable
 import numpy as np
 from loguru import logger
 
 from .. import config
+
+
+class StreamDecoder:
+    """
+    持久化 ffmpeg 流式解码器
+    维护一个长生命周期的 ffmpeg 进程，持续接收 webm 分片并输出 raw PCM
+    """
+
+    def __init__(self, sample_rate: int = 16000, channels: int = 1):
+        self._sample_rate = sample_rate
+        self._channels = channels
+        self._process: Optional[subprocess.Popen] = None
+        self._pcm_buffer = bytearray()
+        self._lock = threading.Lock()
+        self._reader_thread: Optional[threading.Thread] = None
+        self._running = False
+
+    def start(self, init_data: bytes) -> bool:
+        """
+        用初始化段（webm 文件头）启动 ffmpeg 进程
+
+        Args:
+            init_data: webm 初始化段（第一个 dataavailable 块）
+        Returns:
+            是否成功启动
+        """
+        if self._process is not None:
+            self.stop()
+
+        try:
+            self._process = subprocess.Popen(
+                [
+                    "ffmpeg", "-y",
+                    "-f", "matroska",
+                    "-i", "pipe:0",
+                    "-ar", str(self._sample_rate),
+                    "-ac", str(self._channels),
+                    "-sample_fmt", "s16",
+                    "-f", "s16le",
+                    "pipe:1",
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+
+            # 写入初始化段
+            self._process.stdin.write(init_data)
+            self._process.stdin.flush()
+
+            # 启动读取线程
+            self._running = True
+            self._pcm_buffer = bytearray()
+            self._reader_thread = threading.Thread(target=self._read_stdout, daemon=True)
+            self._reader_thread.start()
+
+            logger.debug(f"StreamDecoder 启动成功, init={len(init_data)} bytes")
+            return True
+
+        except Exception as e:
+            logger.error(f"StreamDecoder 启动失败: {e}")
+            return False
+
+    def write(self, audio_chunk: bytes) -> None:
+        """写入音频分片到 ffmpeg stdin"""
+        if self._process is None or self._process.poll() is not None:
+            return
+
+        try:
+            self._process.stdin.write(audio_chunk)
+            self._process.stdin.flush()
+        except (BrokenPipeError, OSError) as e:
+            logger.debug(f"StreamDecoder 写入失败: {e}")
+
+    def read_pcm(self) -> np.ndarray:
+        """
+        读取当前可用的 PCM 数据
+
+        Returns:
+            float32 numpy array，值域 [-1, 1]
+        """
+        with self._lock:
+            if len(self._pcm_buffer) == 0:
+                return np.array([], dtype=np.float32)
+
+            pcm_bytes = bytes(self._pcm_buffer)
+            self._pcm_buffer.clear()
+
+        pcm_data = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
+        pcm_data = pcm_data / 32768.0
+
+        if self._channels > 1 and pcm_data.ndim > 1:
+            pcm_data = pcm_data[:, 0]
+
+        return pcm_data
+
+    def _read_stdout(self) -> None:
+        """后台线程：持续读取 ffmpeg stdout"""
+        chunk_size = 4096
+        while self._running and self._process and self._process.poll() is None:
+            try:
+                data = self._process.stdout.read(chunk_size)
+                if data:
+                    with self._lock:
+                        self._pcm_buffer.extend(data)
+                else:
+                    time.sleep(0.01)
+            except Exception:
+                break
+
+    def stop(self) -> None:
+        """停止解码器"""
+        self._running = False
+
+        if self._process:
+            try:
+                self._process.stdin.close()
+            except Exception:
+                pass
+            try:
+                self._process.terminate()
+                self._process.wait(timeout=3)
+            except Exception:
+                try:
+                    self._process.kill()
+                except Exception:
+                    pass
+            self._process = None
+
+        if self._reader_thread and self._reader_thread.is_alive():
+            self._reader_thread.join(timeout=2)
+
+        with self._lock:
+            self._pcm_buffer.clear()
+
+        logger.debug("StreamDecoder 已停止")
+
+    @property
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.poll() is None
 
 
 class AudioProcessor:
@@ -19,6 +158,7 @@ class AudioProcessor:
 
     def __init__(self):
         self._vad = None
+        self._stream_decoders: dict = {}  # websocket_id -> StreamDecoder
 
     def init_vad(self, aggressiveness: int = None) -> None:
         """初始化 WebRTC VAD"""
@@ -30,6 +170,24 @@ class AudioProcessor:
         except ImportError:
             logger.warning("webrtcvad 未安装，VAD 功能不可用")
 
+    def create_stream_decoder(self, client_id: str) -> StreamDecoder:
+        """为每个 WebSocket 客户端创建独立的流式解码器"""
+        if client_id in self._stream_decoders:
+            self._stream_decoders[client_id].stop()
+
+        decoder = StreamDecoder(
+            sample_rate=config.AUDIO_SAMPLE_RATE,
+            channels=config.AUDIO_CHANNELS,
+        )
+        self._stream_decoders[client_id] = decoder
+        return decoder
+
+    def remove_stream_decoder(self, client_id: str) -> None:
+        """移除客户端的解码器"""
+        if client_id in self._stream_decoders:
+            self._stream_decoders[client_id].stop()
+            del self._stream_decoders[client_id]
+
     def decode_audio(
         self,
         audio_bytes: bytes,
@@ -38,11 +196,11 @@ class AudioProcessor:
     ) -> np.ndarray:
         """
         将浏览器发送的音频字节流解码为 numpy 数组
-        通过 stdin 管道直接传给 ffmpeg，避免临时文件和格式检测问题
+        用于无流式解码器的回退方案
 
         Args:
             audio_bytes: 原始音频字节
-            source_format: 源格式（webm/opus/wav）
+            source_format: 源格式
             target_sample_rate: 目标采样率
 
         Returns:
@@ -51,7 +209,6 @@ class AudioProcessor:
         target_sample_rate = target_sample_rate or config.AUDIO_SAMPLE_RATE
 
         try:
-            # 尝试多种格式解析（浏览器 MediaRecorder 输出的 webm 可能不标准）
             formats_to_try = ["matroska", "webm", "ogg"]
 
             for fmt in formats_to_try:
@@ -75,64 +232,26 @@ class AudioProcessor:
                 )
 
                 if result.returncode == 0 and len(result.stdout) > 0:
-                    # 成功解码
                     pcm_data = np.frombuffer(result.stdout, dtype=np.int16).astype(np.float32)
                     pcm_data = pcm_data / 32768.0
                     return pcm_data
 
-            # 所有格式都失败
-            logger.debug(f"所有格式解码失败 ({', '.join(formats_to_try)}), data_size={len(audio_bytes)}")
+            logger.debug(f"所有格式解码失败, data_size={len(audio_bytes)}")
             return np.array([], dtype=np.float32)
 
         except Exception as e:
             logger.error(f"音频解码失败: {e}")
             return np.array([], dtype=np.float32)
 
-    def resample(
-        self,
-        audio: np.ndarray,
-        orig_sr: int,
-        target_sr: int,
-    ) -> np.ndarray:
-        """重采样"""
-        if orig_sr == target_sr:
-            return audio
-
-        try:
-            import torchaudio
-            import torch
-
-            tensor = torch.from_numpy(audio).unsqueeze(0)
-            resampler = torchaudio.transforms.Resample(orig_sr, target_sr)
-            resampled = resampler(tensor)
-            return resampled.squeeze(0).numpy()
-        except ImportError:
-            # 简单线性插值回退
-            duration = len(audio) / orig_sr
-            target_len = int(duration * target_sr)
-            indices = np.linspace(0, len(audio) - 1, target_len)
-            return np.interp(indices, np.arange(len(audio)), audio).astype(np.float32)
-
     def is_speech(self, audio_chunk: bytes, sample_rate: int = 16000) -> bool:
-        """
-        使用 VAD 检测音频块中是否包含语音
-
-        Args:
-            audio_chunk: 原始 PCM 音频字节（16-bit）
-            sample_rate: 采样率
-
-        Returns:
-            是否包含语音
-        """
+        """使用 VAD 检测音频块中是否包含语音"""
         if self._vad is None:
-            return True  # 没有 VAD 时默认认为有语音
+            return True
 
         try:
-            # WebRTC VAD 要求特定帧长
             frame_duration_ms = config.VAD_FRAME_DURATION
-            frame_size = int(sample_rate * frame_duration_ms / 1000) * 2  # 16-bit = 2 bytes
+            frame_size = int(sample_rate * frame_duration_ms / 1000) * 2
 
-            # 检查至少一个帧包含语音
             for i in range(0, len(audio_chunk) - frame_size + 1, frame_size):
                 frame = audio_chunk[i : i + frame_size]
                 if len(frame) == frame_size and self._vad.is_speech(frame, sample_rate):
@@ -142,48 +261,6 @@ class AudioProcessor:
         except Exception:
             return True
 
-    def split_audio(
-        self,
-        audio: np.ndarray,
-        chunk_duration: float = None,
-        overlap_duration: float = None,
-        sample_rate: int = None,
-    ) -> list:
-        """
-        将长音频分块
-
-        Args:
-            audio: 音频数据
-            chunk_duration: 块时长（秒）
-            overlap_duration: 重叠时长（秒）
-            sample_rate: 采样率
-
-        Returns:
-            音频块列表
-        """
-        chunk_duration = chunk_duration or config.AUDIO_CHUNK_DURATION
-        overlap_duration = overlap_duration or config.AUDIO_OVERLAP_DURATION
-        sample_rate = sample_rate or config.AUDIO_SAMPLE_RATE
-
-        chunk_size = int(chunk_duration * sample_rate)
-        overlap_size = int(overlap_duration * sample_rate)
-        step = chunk_size - overlap_size
-
-        chunks = []
-        start = 0
-        while start < len(audio):
-            end = min(start + chunk_size, len(audio))
-            chunk = audio[start:end]
-
-            # 跳过太短的块
-            if len(chunk) < sample_rate * 0.5:  # 小于 0.5 秒
-                break
-
-            chunks.append(chunk)
-            start += step
-
-        return chunks
-
     @staticmethod
     def normalize(audio: np.ndarray) -> np.ndarray:
         """音频归一化"""
@@ -191,19 +268,3 @@ class AudioProcessor:
         if max_val > 0:
             audio = audio / max_val
         return audio
-
-    @staticmethod
-    def remove_silence(
-        audio: np.ndarray,
-        threshold: float = 0.01,
-        sample_rate: int = 16000,
-    ) -> np.ndarray:
-        """简单的静音移除"""
-        # 找到非静音区域
-        non_silent = np.abs(audio) > threshold
-        if not non_silent.any():
-            return audio
-
-        first = np.argmax(non_silent)
-        last = len(audio) - np.argmax(non_silent[::-1]) - 1
-        return audio[first:last+1]

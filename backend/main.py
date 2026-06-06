@@ -234,6 +234,11 @@ async def websocket_translate(websocket: WebSocket):
     source_lang = config.DEFAULT_SOURCE_LANG
     target_lang = config.DEFAULT_TARGET_LANG
 
+    # 为该客户端创建持久化流式解码器
+    client_id = str(id(websocket))
+    stream_decoder = audio_processor.create_stream_decoder(client_id)
+    init_received = False
+
     try:
         while True:
             message = await websocket.receive()
@@ -307,19 +312,31 @@ async def websocket_translate(websocket: WebSocket):
                 audio_bytes = message["bytes"]
                 start_time = time.time()
 
-                logger.debug(f"收到音频数据: {len(audio_bytes)} bytes")
-
                 try:
-                    # 1. 解码音频
-                    audio_data = audio_processor.decode_audio(
-                        audio_bytes, source_format="webm"
-                    )
+                    if not init_received:
+                        # 第一个二进制消息 = 初始化段，启动流式解码器
+                        if not stream_decoder.start(audio_bytes):
+                            await websocket.send_json({
+                                "type": "error",
+                                "message": "音频解码器启动失败",
+                            })
+                            continue
+                        init_received = True
+                        logger.debug(f"流式解码器已启动, init={len(audio_bytes)} bytes")
+                        # 等待一小段时间让 ffmpeg 产生初始输出
+                        await asyncio.sleep(0.1)
+
+                    else:
+                        # 后续音频分片，写入持久化解码器
+                        stream_decoder.write(audio_bytes)
+
+                    # 从解码器读取可用的 PCM 数据
+                    audio_data = stream_decoder.read_pcm()
 
                     if len(audio_data) == 0:
-                        logger.debug("解码后音频为空，跳过")
                         continue
 
-                    logger.debug(f"解码完成: {len(audio_data)} samples, max={np.abs(audio_data).max():.4f}")
+                    logger.debug(f"解码完成: {len(audio_data)} samples")
 
                     # 2. 语音识别
                     if asr_engine is None or not asr_engine.is_loaded():
@@ -382,6 +399,8 @@ async def websocket_translate(websocket: WebSocket):
         logger.info("WebSocket 客户端已断开")
     except Exception as e:
         logger.error(f"WebSocket 错误: {e}")
+    finally:
+        audio_processor.remove_stream_decoder(client_id)
 
 
 # ============================================================

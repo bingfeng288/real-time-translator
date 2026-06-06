@@ -211,39 +211,33 @@ class AudioRecorder {
 
     /**
      * 获取当前音频块并发送
-     * 第一次返回完整初始化段（含文件头+首段音频）
-     * 后续每次返回 初始化段 + 新增音频增量
+     * 第一次返回初始化段（webm 文件头 + 首段音频）
+     * 后续每次只返回新增的音频分片
      */
     flushChunks() {
-        // 根据音频源选择 VAD 阈值
         const threshold = this.audioSource === 'system' ? this._systemVadThreshold : this.vadThreshold;
         const volume = this._currentVolume || 0;
 
         this._chunkIndex++;
 
-        // 第一次 flush：发送初始化段（它已经包含首段音频）
+        // 第一次 flush：发送初始化段（含文件头 + 首段音频）
         if (this._chunkIndex === 1 && this._initSegment) {
             const blob = new Blob([this._initSegment], { type: this._getSupportedMimeType() });
-            console.log(`[AudioRecorder] flush #1 (init): vol=${volume.toFixed(4)}, size=${blob.size}`);
+            console.log(`[AudioRecorder] flush #1 (init): size=${blob.size}`);
             return blob;
         }
 
-        // 后续 flush：发送 init + 新增增量
-        const newChunkCount = this.chunks.length;
-        if (newChunkCount === 0) return null;
+        // 后续 flush：只发送新增的增量分片
+        const count = this.chunks.length;
+        if (count === 0) return null;
 
-        const rawBlob = new Blob(this.chunks, { type: this._getSupportedMimeType() });
+        const blob = new Blob(this.chunks, { type: this._getSupportedMimeType() });
         this.chunks = []; // 清空，下次只拿新增的
 
-        // 拼接初始化段确保格式完整
-        const finalBlob = this._initSegment
-            ? new Blob([this._initSegment, rawBlob], { type: rawBlob.type })
-            : rawBlob;
-
-        console.log(`[AudioRecorder] flush #${this._chunkIndex}: newChunks=${newChunkCount}, vol=${volume.toFixed(4)}, size=${finalBlob.size}`);
+        console.log(`[AudioRecorder] flush #${this._chunkIndex}: newChunks=${count}, vol=${volume.toFixed(4)}, size=${blob.size}`);
 
         if (volume > threshold) {
-            return finalBlob;
+            return blob;
         }
 
         console.log(`[AudioRecorder] 音量过低，跳过`);
