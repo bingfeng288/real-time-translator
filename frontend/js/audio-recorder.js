@@ -1,17 +1,13 @@
 /**
  * 音频录制器
  * 负责麦克风 / 系统声音采集、浏览器端 VAD、音频分块发送
- *
- * 系统声音采集方案：
- *   使用浏览器原生 getDisplayMedia API，用户选择"共享标签页"或"共享屏幕"并勾选"共享音频"
- *   零安装零配置，Chrome / Edge / Firefox 均支持
  */
 
 class AudioRecorder {
     constructor(options = {}) {
         this.sampleRate = options.sampleRate || 16000;
-        this.chunkInterval = options.chunkInterval || 3000; // 3秒一块
-        this.vadThreshold = options.vadThreshold || 0.01;   // VAD 阈值
+        this.chunkInterval = options.chunkInterval || 3000;
+        this.vadThreshold = options.vadThreshold || 0.01;
 
         this.mediaRecorder = null;
         this.audioContext = null;
@@ -23,23 +19,15 @@ class AudioRecorder {
         this.onVolumeChange = options.onVolumeChange || (() => {});
         this.onError = options.onError || (() => {});
 
-        // 音频输入源：'microphone' 或 'system'
         this.audioSource = options.audioSource || 'microphone';
-
-        this._chunkTimer = null;
         this._analyseTimer = null;
-
-        // 系统音频音量通常较低，使用更低的 VAD 阈值
         this._systemVadThreshold = 0.002;
 
-        // 保存 webm 初始化段（文件头），每次发送时拼接
-        this._initSegment = null;
+        // webm 头部（不含音频 Cluster），用于初始化后端解码器
+        this._webmHeader = null;
+        this._headerSent = false;
     }
 
-    /**
-     * 设置音频输入源
-     * @param {'microphone'|'system'} source
-     */
     setSource(source) {
         if (this.isRecording) {
             this.onError(new Error('请先停止录音再切换音频源'));
@@ -48,43 +36,28 @@ class AudioRecorder {
         this.audioSource = source;
     }
 
-    /**
-     * 麦克风录音（getUserMedia）
-     */
     async _startMicrophone() {
         this.stream = await navigator.mediaDevices.getUserMedia({
             audio: {
-                sampleRate: this.sampleRate,
-                channelCount: 1,
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
+                sampleRate: this.sampleRate, channelCount: 1,
+                echoCancellation: true, noiseSuppression: true, autoGainControl: true,
             },
         });
     }
 
-    /**
-     * 系统声音录音（getDisplayMedia + 只保留音频轨道）
-     */
     async _startSystemAudio() {
         const displayStream = await navigator.mediaDevices.getDisplayMedia({
             video: { width: 1, height: 1, frameRate: 1 },
             audio: {
-                sampleRate: this.sampleRate,
-                channelCount: 1,
-                echoCancellation: false,
-                noiseSuppression: false,
-                autoGainControl: false,
+                sampleRate: this.sampleRate, channelCount: 1,
+                echoCancellation: false, noiseSuppression: false, autoGainControl: false,
             },
         });
 
         const audioTracks = displayStream.getAudioTracks();
         if (audioTracks.length === 0) {
             displayStream.getTracks().forEach(t => t.stop());
-            throw new Error(
-                '未检测到音频。请在共享时勾选「共享音频」选项。\n' +
-                '提示：选择共享"标签页"效果最佳。'
-            );
+            throw new Error('未检测到音频。请在共享时勾选「共享音频」选项。');
         }
 
         displayStream.getVideoTracks().forEach(t => t.stop());
@@ -93,16 +66,11 @@ class AudioRecorder {
         audioTracks[0].addEventListener('ended', () => {
             if (this.isRecording) {
                 this.onError(new Error('共享已结束'));
-                if (typeof this.onSystemAudioEnded === 'function') {
-                    this.onSystemAudioEnded();
-                }
+                if (typeof this.onSystemAudioEnded === 'function') this.onSystemAudioEnded();
             }
         });
     }
 
-    /**
-     * 开始录音
-     */
     async start() {
         try {
             if (this.audioSource === 'system') {
@@ -117,43 +85,64 @@ class AudioRecorder {
             this.analyser.fftSize = 256;
             source.connect(this.analyser);
 
-            const mimeType = this._getSupportedMimeType();
             this.mediaRecorder = new MediaRecorder(this.stream, {
-                mimeType: mimeType,
+                mimeType: this._getSupportedMimeType(),
                 audioBitsPerSecond: 16000,
             });
 
             this.chunks = [];
-            this._initSegment = null;
+            this._webmHeader = null;
+            this._headerSent = false;
 
             this.mediaRecorder.ondataavailable = async (e) => {
                 if (e.data.size > 0) {
-                    // 第一个分片包含 webm 文件头，保存它
-                    if (this._initSegment === null) {
-                        this._initSegment = await e.data.arrayBuffer();
+                    if (!this._webmHeader) {
+                        // 第一个分片：提取 webm 头部（到第一个 Cluster 之前）
+                        const buffer = await e.data.arrayBuffer();
+                        const headerEnd = this._findClusterStart(buffer);
+                        if (headerEnd > 0) {
+                            this._webmHeader = buffer.slice(0, headerEnd);
+                            // 剩余部分是音频数据，保存为 chunk
+                            const audioData = buffer.slice(headerEnd);
+                            if (audioData.byteLength > 0) {
+                                this.chunks.push(new Blob([audioData], { type: e.data.type }));
+                            }
+                        } else {
+                            // 找不到 Cluster，整个作为 header
+                            this._webmHeader = buffer;
+                        }
+                    } else {
+                        this.chunks.push(e.data);
                     }
-                    this.chunks.push(e.data);
                 }
             };
 
             this.mediaRecorder.start(this.chunkInterval);
             this.isRecording = true;
             this._startVolumeAnalysis();
-
             return true;
 
         } catch (err) {
-            if (err.name === 'NotAllowedError') {
-                return false;
-            }
+            if (err.name === 'NotAllowedError') return false;
             this.onError(err);
             return false;
         }
     }
 
     /**
-     * 停止录音
+     * 查找 webm 中第一个 Cluster 元素的起始位置
+     * Cluster element ID = 0x1F43B675
      */
+    _findClusterStart(buffer) {
+        const bytes = new Uint8Array(buffer);
+        for (let i = 0; i < bytes.length - 3; i++) {
+            if (bytes[i] === 0x1F && bytes[i+1] === 0x43 && bytes[i+2] === 0xB6 && bytes[i+3] === 0x75) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     stop() {
         this.isRecording = false;
 
@@ -165,53 +154,46 @@ class AudioRecorder {
         if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
             this.mediaRecorder.stop();
         }
-
         if (this.stream) {
             this.stream.getTracks().forEach(track => track.stop());
         }
-
         if (this.audioContext) {
             this.audioContext.close();
         }
 
         this.chunks = [];
-        this._initSegment = null;
+        this._webmHeader = null;
+        this._headerSent = false;
     }
 
     /**
-     * 获取当前音频块并发送
-     * 每次只发送 initSegment + 本轮新增的 chunks（不累积旧数据）
+     * 获取待发送的音频数据
+     * 第一次返回：{ type: 'init', data: webmHeader }
+     * 后续返回：{ type: 'audio', data: audioChunks }
      */
     flushChunks() {
         const threshold = this.audioSource === 'system' ? this._systemVadThreshold : this.vadThreshold;
         const volume = this._currentVolume || 0;
 
-        // 取出并清空本轮 chunks
+        // 第一次：发送 webm 头部
+        if (!this._headerSent && this._webmHeader) {
+            this._headerSent = true;
+            return { type: 'init', data: new Blob([this._webmHeader]) };
+        }
+
+        // 后续：只发送新增的音频 chunks
         const newChunks = this.chunks.splice(0);
         if (newChunks.length === 0) return null;
 
-        // 拼接 init + 本轮新增 → 独立完整的 webm
-        let blob;
-        if (this._initSegment) {
-            blob = new Blob([this._initSegment, ...newChunks], { type: this._getSupportedMimeType() });
-        } else {
-            blob = new Blob(newChunks, { type: this._getSupportedMimeType() });
-        }
-
         if (volume > threshold) {
-            return blob;
+            return { type: 'audio', data: new Blob(newChunks) };
         }
 
         return null;
     }
 
     _getSupportedMimeType() {
-        const types = [
-            'audio/webm;codecs=opus',
-            'audio/webm',
-            'audio/ogg;codecs=opus',
-            'audio/mp4',
-        ];
+        const types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
         for (const type of types) {
             if (MediaRecorder.isTypeSupported(type)) return type;
         }
@@ -233,9 +215,7 @@ class AudioRecorder {
         analyse();
     }
 
-    getVolume() {
-        return this._currentVolume || 0;
-    }
+    getVolume() { return this._currentVolume || 0; }
 }
 
 window.AudioRecorder = AudioRecorder;

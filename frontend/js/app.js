@@ -53,10 +53,17 @@
 
     const recorder = new AudioRecorder({
         chunkInterval: 3000,
-        onAudioData: (blob) => {
+        onAudioData: (result) => {
             // 音频块准备好后通过 WebSocket 发送
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                blob.arrayBuffer().then(buffer => {
+            if (!ws || ws.readyState !== WebSocket.OPEN || !result) return;
+            if (result.type === 'init') {
+                // init 段用 JSON 包装，标记为初始化数据
+                result.data.arrayBuffer().then(buffer => {
+                    ws.send(JSON.stringify({ type: 'audio_init', size: buffer.byteLength }));
+                    ws.send(buffer);
+                });
+            } else {
+                result.data.arrayBuffer().then(buffer => {
                     ws.send(buffer);
                 });
             }
@@ -220,11 +227,18 @@
         stopChunkSender();
 
         // 发送最后一块
-        const lastChunk = recorder.flushChunks();
-        if (lastChunk && ws && ws.readyState === WebSocket.OPEN) {
-            lastChunk.arrayBuffer().then(buffer => {
-                ws.send(buffer);
-            });
+        const lastResult = recorder.flushChunks();
+        if (lastResult && ws && ws.readyState === WebSocket.OPEN) {
+            if (lastResult.type === 'init') {
+                lastResult.data.arrayBuffer().then(buffer => {
+                    ws.send(JSON.stringify({ type: 'audio_init', size: buffer.byteLength }));
+                    ws.send(buffer);
+                });
+            } else {
+                lastResult.data.arrayBuffer().then(buffer => {
+                    ws.send(buffer);
+                });
+            }
         }
     }
 
@@ -239,13 +253,22 @@
         chunkSenderTimer = setInterval(() => {
             if (!isRecording) return;
 
-            const blob = recorder.flushChunks();
-            if (blob && ws && ws.readyState === WebSocket.OPEN) {
-                blob.arrayBuffer().then(buffer => {
+            const result = recorder.flushChunks();
+            if (!result || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+            if (result.type === 'init') {
+                // init 段：先发 JSON 标记，再发二进制数据
+                result.data.arrayBuffer().then(buffer => {
+                    ws.send(JSON.stringify({ type: 'audio_init', size: buffer.byteLength }));
+                    ws.send(buffer);
+                });
+            } else {
+                // 音频增量：直接发二进制
+                result.data.arrayBuffer().then(buffer => {
                     ws.send(buffer);
                 });
             }
-        }, 3000); // 每 3 秒发送一块
+        }, 3000);
     }
 
     function stopChunkSender() {

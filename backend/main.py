@@ -3,6 +3,7 @@
 WebSocket 端点：接收音频流 → ASR → 翻译 → 返回结果
 """
 
+import asyncio
 import json
 import time
 from pathlib import Path
@@ -235,6 +236,11 @@ async def websocket_translate(websocket: WebSocket):
     source_lang = config.DEFAULT_SOURCE_LANG
     target_lang = config.DEFAULT_TARGET_LANG
 
+    # 持久化流式解码器
+    client_id = str(id(websocket))
+    decoder = audio_processor.create_decoder(client_id)
+    waiting_for_init = False  # 等待 init 二进制数据
+
     # 上一次识别的文本，用于去重
     last_recognized_text = ""
 
@@ -248,11 +254,14 @@ async def websocket_translate(websocket: WebSocket):
                     data = json.loads(message["text"])
                     msg_type = data.get("type")
 
-                    if msg_type == "config":
+                    if msg_type == "audio_init":
+                        # 前端标记下一个二进制消息是 webm 头部
+                        waiting_for_init = True
+
+                    elif msg_type == "config":
                         source_lang = data.get("source_lang", source_lang)
                         target_lang = data.get("target_lang", target_lang)
 
-                        # 切换 ASR 引擎
                         if "asr_engine" in data:
                             new_engine = data["asr_engine"]
                             if new_engine != config.ASR_ENGINE:
@@ -261,25 +270,16 @@ async def websocket_translate(websocket: WebSocket):
                                     asr_engine.load_model()
                                     config.ASR_ENGINE = new_engine
                                 except Exception as e:
-                                    await websocket.send_json({
-                                        "type": "error",
-                                        "message": f"ASR 引擎切换失败: {e}",
-                                    })
+                                    await websocket.send_json({"type": "error", "message": f"ASR 引擎切换失败: {e}"})
 
-                        # 切换 Whisper 模型大小
                         if "whisper_model_size" in data and isinstance(asr_engine, WhisperEngine):
                             new_size = data["whisper_model_size"]
                             if new_size in config.WHISPER_MODELS:
                                 try:
                                     asr_engine.switch_model(new_size)
-                                    logger.info(f"Whisper 模型切换为: {new_size}")
                                 except Exception as e:
-                                    await websocket.send_json({
-                                        "type": "error",
-                                        "message": f"Whisper 模型切换失败: {e}",
-                                    })
+                                    await websocket.send_json({"type": "error", "message": f"Whisper 模型切换失败: {e}"})
 
-                        # 切换 Whisper 模式
                         if "whisper_model_mode" in data:
                             mode = data["whisper_model_mode"]
                             if mode in ("auto", "manual"):
@@ -288,8 +288,7 @@ async def websocket_translate(websocket: WebSocket):
                         whisper_size = asr_engine._model_size if isinstance(asr_engine, WhisperEngine) else None
                         await websocket.send_json({
                             "type": "config_updated",
-                            "source_lang": source_lang,
-                            "target_lang": target_lang,
+                            "source_lang": source_lang, "target_lang": target_lang,
                             "asr_engine": config.ASR_ENGINE,
                             "whisper_model_size": whisper_size,
                             "whisper_model_mode": config.WHISPER_MODEL_MODE,
@@ -300,92 +299,78 @@ async def websocket_translate(websocket: WebSocket):
                         await websocket.send_json({"type": "pong"})
 
                 except json.JSONDecodeError:
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": "无效的 JSON 格式",
-                    })
+                    await websocket.send_json({"type": "error", "message": "无效的 JSON 格式"})
 
             elif "bytes" in message:
-                # 音频数据（每个消息 = 一个完整的 webm 文件，含 init 段 + 音频数据）
                 audio_bytes = message["bytes"]
-                start_time = time.time()
+
+                if waiting_for_init:
+                    # webm 头部 → 启动持久化 ffmpeg
+                    waiting_for_init = False
+                    if decoder.start(audio_bytes):
+                        logger.debug(f"解码器已启动, header={len(audio_bytes)} bytes")
+                    else:
+                        await websocket.send_json({"type": "error", "message": "解码器启动失败"})
+                    continue
+
+                # 音频 Cluster 数据 → 写入解码器
+                decoder.write(audio_bytes)
+
+                # 等待一小段时间让 ffmpeg 产生输出
+                await asyncio.sleep(0.15)
+
+                # 读取 PCM
+                audio_data = decoder.read_pcm()
+                if len(audio_data) == 0:
+                    continue
 
                 try:
-                    # 1. 解码音频
-                    audio_data = audio_processor.decode_audio(
-                        audio_bytes, source_format="webm"
-                    )
-
-                    if len(audio_data) == 0:
-                        continue
-
-                    # 2. 语音识别
                     if asr_engine is None or not asr_engine.is_loaded():
-                        await websocket.send_json({
-                            "type": "error",
-                            "message": "ASR 引擎未就绪",
-                        })
+                        await websocket.send_json({"type": "error", "message": "ASR 引擎未就绪"})
                         continue
 
                     recognized_text = asr_engine.transcribe(
-                        audio_data,
-                        sample_rate=config.AUDIO_SAMPLE_RATE,
-                        language=source_lang,
+                        audio_data, sample_rate=config.AUDIO_SAMPLE_RATE, language=source_lang,
                     )
 
                     if not recognized_text:
                         continue
 
-                    # 去重：如果识别结果和上次完全相同，跳过
+                    # 去重
                     if recognized_text == last_recognized_text:
                         continue
-
                     last_recognized_text = recognized_text
 
-                    # 3. 翻译
                     if translator is None or not translator.is_loaded():
-                        await websocket.send_json({
-                            "type": "error",
-                            "message": "翻译模型未就绪",
-                        })
+                        await websocket.send_json({"type": "error", "message": "翻译模型未就绪"})
                         continue
 
+                    start_time = time.time()
                     translated_text = translator.translate(
-                        recognized_text,
-                        source_lang=source_lang,
-                        target_lang=target_lang,
+                        recognized_text, source_lang=source_lang, target_lang=target_lang,
                     )
-
-                    # 4. 返回结果
                     latency = (time.time() - start_time) * 1000
 
                     await websocket.send_json({
                         "type": "result",
                         "original": recognized_text,
                         "translated": translated_text,
-                        "source_lang": source_lang,
-                        "target_lang": target_lang,
+                        "source_lang": source_lang, "target_lang": target_lang,
                         "timestamp": time.time(),
                         "latency_ms": round(latency, 1),
                     })
 
-                    logger.info(
-                        f"[{source_lang}→{target_lang}] "
-                        f"{recognized_text} => {translated_text} "
-                        f"({latency:.0f}ms)"
-                    )
+                    logger.info(f"[{source_lang}→{target_lang}] {recognized_text} => {translated_text} ({latency:.0f}ms)")
 
                 except Exception as e:
                     logger.error(f"处理音频失败: {e}")
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": str(e),
-                    })
 
     except WebSocketDisconnect:
         logger.info("WebSocket 客户端已断开")
     except Exception as e:
         logger.error(f"WebSocket 错误: {e}")
+    finally:
+        audio_processor.remove_decoder(client_id)
 
 
 # ============================================================
