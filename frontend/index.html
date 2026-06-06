@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>实时语音翻译</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- 顶部标题栏 -->
+        <header class="header">
+            <h1>🎙️ 实时语音翻译</h1>
+            <div class="status" id="status">
+                <span class="status-dot" id="statusDot"></span>
+                <span id="statusText">未连接</span>
+            </div>
+        </header>
+
+        <!-- 控制面板 -->
+        <div class="control-panel">
+            <!-- 语言选择 -->
+            <div class="lang-selector">
+                <div class="lang-group">
+                    <label>源语言</label>
+                    <select id="sourceLang">
+                        <option value="zh">中文</option>
+                        <option value="en">English</option>
+                        <option value="ja">日本語</option>
+                        <option value="ko">한국어</option>
+                        <option value="fr">Français</option>
+                        <option value="de">Deutsch</option>
+                        <option value="es">Español</option>
+                        <option value="ru">Русский</option>
+                    </select>
+                </div>
+
+                <button class="swap-btn" id="swapBtn" title="交换语言">⇄</button>
+
+                <div class="lang-group">
+                    <label>目标语言</label>
+                    <select id="targetLang">
+                        <option value="en">English</option>
+                        <option value="zh">中文</option>
+                        <option value="ja">日本語</option>
+                        <option value="ko">한국어</option>
+                        <option value="fr">Français</option>
+                        <option value="de">Deutsch</option>
+                        <option value="es">Español</option>
+                        <option value="ru">Русский</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- ASR 引擎选择 -->
+            <div class="engine-selector">
+                <label>识别引擎</label>
+                <select id="asrEngine">
+                    <option value="whisper">Whisper（多语言）</option>
+                    <option value="funasr">FunASR（中文优化）</option>
+                </select>
+            </div>
+
+            <!-- Whisper 模型选择 -->
+            <div class="whisper-model-selector" id="whisperModelSection">
+                <div class="whisper-mode-row">
+                    <label>Whisper 模型</label>
+                    <div class="mode-toggle">
+                        <button class="mode-btn active" id="modeAuto" title="根据设备自动选择最佳模型">自动</button>
+                        <button class="mode-btn" id="modeManual" title="手动选择模型大小">手动</button>
+                    </div>
+                </div>
+                <div class="whisper-model-info" id="whisperAutoInfo">
+                    <span class="model-badge" id="whisperAutoBadge">-</span>
+                    <span class="model-desc" id="whisperAutoDesc">根据设备自动推荐</span>
+                </div>
+                <select id="whisperModelSize" class="whisper-model-select" style="display:none">
+                    <option value="tiny">tiny (39M) — 最快，精度低</option>
+                    <option value="base" selected>base (74M) — 速度与精度平衡</option>
+                    <option value="small">small (244M) — 较好精度</option>
+                    <option value="medium">medium (769M) — 高精度</option>
+                    <option value="large">large (1550M) — 最高精度</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- 录音按钮 -->
+        <div class="record-section">
+            <button class="record-btn" id="recordBtn">
+                <span class="record-icon" id="recordIcon">🎤</span>
+                <span id="recordText">按住说话</span>
+            </button>
+            <div class="audio-visualizer" id="visualizer">
+                <canvas id="visualizerCanvas" width="300" height="60"></canvas>
+            </div>
+        </div>
+
+        <!-- 字幕显示区域 -->
+        <div class="subtitle-area" id="subtitleArea">
+            <div class="subtitle-placeholder" id="subtitlePlaceholder">
+                点击上方按钮开始语音翻译
+            </div>
+            <!-- 字幕条目动态插入 -->
+        </div>
+
+        <!-- 统计信息 -->
+        <div class="stats">
+            <span id="statCount">翻译: 0 条</span>
+            <span id="statLatency">延迟: - ms</span>
+        </div>
+    </div>
+
+    <script src="/static/js/audio-recorder.js"></script>
+    <script src="/static/js/subtitle.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
