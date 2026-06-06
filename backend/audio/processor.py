@@ -38,7 +38,7 @@ class AudioProcessor:
     ) -> np.ndarray:
         """
         将浏览器发送的音频字节流解码为 numpy 数组
-        使用 ffmpeg 解码，兼容所有格式和 Python 版本
+        通过 stdin 管道直接传给 ffmpeg，避免临时文件和格式检测问题
 
         Args:
             audio_bytes: 原始音频字节
@@ -51,54 +51,38 @@ class AudioProcessor:
         target_sample_rate = target_sample_rate or config.AUDIO_SAMPLE_RATE
 
         try:
-            # 写入临时文件
-            with tempfile.NamedTemporaryFile(
-                suffix=f".{source_format}", delete=False
-            ) as tmp_in:
-                tmp_in.write(audio_bytes)
-                tmp_in_path = tmp_in.name
+            # 通过 stdin 管道喂给 ffmpeg，输出 raw PCM 到 stdout
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", source_format,       # 指定输入格式
+                "-i", "pipe:0",            # 从 stdin 读取
+                "-ar", str(target_sample_rate),
+                "-ac", str(config.AUDIO_CHANNELS),
+                "-sample_fmt", "s16",
+                "-f", "s16le",             # 输出 raw 16-bit PCM
+                "pipe:1",                  # 写到 stdout
+            ]
 
-            tmp_out_path = tmp_in_path.replace(f".{source_format}", ".wav")
+            result = subprocess.run(
+                cmd,
+                input=audio_bytes,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+            )
 
-            try:
-                # ffmpeg 解码为 wav（16kHz, mono, 16-bit）
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-i", tmp_in_path,
-                    "-ar", str(target_sample_rate),
-                    "-ac", str(config.AUDIO_CHANNELS),
-                    "-sample_fmt", "s16",
-                    "-f", "wav",
-                    tmp_out_path,
-                ]
-                result = subprocess.run(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    timeout=10,
-                )
+            if result.returncode != 0:
+                # 只在非格式错误时打印日志（避免刷屏）
+                err = result.stderr.decode(errors="replace")
+                if "Invalid data found" not in err:
+                    logger.error(f"ffmpeg 解码失败: {err[-200:]}")
+                return np.array([], dtype=np.float32)
 
-                if result.returncode != 0:
-                    logger.error(f"ffmpeg 解码失败: {result.stderr.decode()[:200]}")
-                    return np.array([], dtype=np.float32)
+            # 将 raw PCM bytes 转为 numpy array
+            pcm_data = np.frombuffer(result.stdout, dtype=np.int16).astype(np.float32)
+            pcm_data = pcm_data / 32768.0  # 归一化到 [-1, 1]
 
-                # 读取 wav 文件
-                import soundfile as sf
-                data, sr = sf.read(tmp_out_path, dtype="float32")
-
-                # 如果是多声道，取第一声道
-                if data.ndim > 1:
-                    data = data[:, 0]
-
-                return data
-
-            finally:
-                # 清理临时文件
-                for p in (tmp_in_path, tmp_out_path):
-                    try:
-                        os.unlink(p)
-                    except OSError:
-                        pass
+            return pcm_data
 
         except Exception as e:
             logger.error(f"音频解码失败: {e}")
