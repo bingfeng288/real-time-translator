@@ -4,6 +4,9 @@
 """
 
 import io
+import subprocess
+import tempfile
+import os
 from typing import Optional
 import numpy as np
 from loguru import logger
@@ -35,6 +38,7 @@ class AudioProcessor:
     ) -> np.ndarray:
         """
         将浏览器发送的音频字节流解码为 numpy 数组
+        使用 ffmpeg 解码，兼容所有格式和 Python 版本
 
         Args:
             audio_bytes: 原始音频字节
@@ -47,24 +51,54 @@ class AudioProcessor:
         target_sample_rate = target_sample_rate or config.AUDIO_SAMPLE_RATE
 
         try:
-            from pydub import AudioSegment
+            # 写入临时文件
+            with tempfile.NamedTemporaryFile(
+                suffix=f".{source_format}", delete=False
+            ) as tmp_in:
+                tmp_in.write(audio_bytes)
+                tmp_in_path = tmp_in.name
 
-            # 从字节流加载
-            audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=source_format)
+            tmp_out_path = tmp_in_path.replace(f".{source_format}", ".wav")
 
-            # 转换为单声道、目标采样率
-            audio = audio.set_channels(config.AUDIO_CHANNELS)
-            audio = audio.set_frame_rate(target_sample_rate)
-            audio = audio.set_sample_width(config.AUDIO_SAMPLE_WIDTH)
+            try:
+                # ffmpeg 解码为 wav（16kHz, mono, 16-bit）
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-i", tmp_in_path,
+                    "-ar", str(target_sample_rate),
+                    "-ac", str(config.AUDIO_CHANNELS),
+                    "-sample_fmt", "s16",
+                    "-f", "wav",
+                    tmp_out_path,
+                ]
+                result = subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    timeout=10,
+                )
 
-            # 转为 numpy array
-            samples = np.array(audio.get_array_of_samples(), dtype=np.float32)
+                if result.returncode != 0:
+                    logger.error(f"ffmpeg 解码失败: {result.stderr.decode()[:200]}")
+                    return np.array([], dtype=np.float32)
 
-            # 归一化到 [-1, 1]
-            max_val = float(2 ** (config.AUDIO_SAMPLE_WIDTH * 8 - 1))
-            samples = samples / max_val
+                # 读取 wav 文件
+                import soundfile as sf
+                data, sr = sf.read(tmp_out_path, dtype="float32")
 
-            return samples
+                # 如果是多声道，取第一声道
+                if data.ndim > 1:
+                    data = data[:, 0]
+
+                return data
+
+            finally:
+                # 清理临时文件
+                for p in (tmp_in_path, tmp_out_path):
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
 
         except Exception as e:
             logger.error(f"音频解码失败: {e}")
