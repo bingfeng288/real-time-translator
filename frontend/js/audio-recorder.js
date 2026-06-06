@@ -32,9 +32,8 @@ class AudioRecorder {
         // 系统音频音量通常较低，使用更低的 VAD 阈值
         this._systemVadThreshold = 0.002;
 
-        // 保存 webm 初始化段（文件头），后续每个分片都需要带上它才能被 ffmpeg 解码
+        // 保存 webm 初始化段（文件头），每次发送时拼接
         this._initSegment = null;
-        this._chunkIndex = 0;
     }
 
     /**
@@ -66,22 +65,10 @@ class AudioRecorder {
 
     /**
      * 系统声音录音（getDisplayMedia + 只保留音频轨道）
-     *
-     * 浏览器会弹出一个选择框，让用户选择共享哪个屏幕/标签页，
-     * 用户需要勾选"共享音频"选项。
-     * macOS 注意：系统设置 → 声音 → 输出 不能设为 BlackHole 等虚拟设备，
-     *            需要是实际的扬声器/耳机，否则 getDisplayMedia 可能采集不到。
      */
     async _startSystemAudio() {
-        // getDisplayMedia 必须同时请求视频（浏览器规范要求），
-        // 我们拿到流后丢弃视频轨道，只保留音频。
         const displayStream = await navigator.mediaDevices.getDisplayMedia({
-            video: {
-                // 使用最小分辨率，减少性能开销
-                width: 1,
-                height: 1,
-                frameRate: 1,
-            },
+            video: { width: 1, height: 1, frameRate: 1 },
             audio: {
                 sampleRate: this.sampleRate,
                 channelCount: 1,
@@ -91,10 +78,8 @@ class AudioRecorder {
             },
         });
 
-        // 检查是否包含音频轨道
         const audioTracks = displayStream.getAudioTracks();
         if (audioTracks.length === 0) {
-            // 用户没有勾选"共享音频"
             displayStream.getTracks().forEach(t => t.stop());
             throw new Error(
                 '未检测到音频。请在共享时勾选「共享音频」选项。\n' +
@@ -102,17 +87,12 @@ class AudioRecorder {
             );
         }
 
-        // 丢弃视频轨道，只保留音频
         displayStream.getVideoTracks().forEach(t => t.stop());
-
-        // 用纯音频轨道创建新流
         this.stream = new MediaStream(audioTracks);
 
-        // 监听用户通过浏览器 UI 停止共享
         audioTracks[0].addEventListener('ended', () => {
             if (this.isRecording) {
                 this.onError(new Error('共享已结束'));
-                // 触发停止
                 if (typeof this.onSystemAudioEnded === 'function') {
                     this.onSystemAudioEnded();
                 }
@@ -131,14 +111,12 @@ class AudioRecorder {
                 await this._startMicrophone();
             }
 
-            // 创建 AudioContext 用于音量分析
             this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
             const source = this.audioContext.createMediaStreamSource(this.stream);
             this.analyser = this.audioContext.createAnalyser();
             this.analyser.fftSize = 256;
             source.connect(this.analyser);
 
-            // 使用 MediaRecorder 录制 webm/opus 格式
             const mimeType = this._getSupportedMimeType();
             this.mediaRecorder = new MediaRecorder(this.stream, {
                 mimeType: mimeType,
@@ -147,34 +125,24 @@ class AudioRecorder {
 
             this.chunks = [];
             this._initSegment = null;
-            this._chunkIndex = 0;
-            this._headerSent = false;
 
             this.mediaRecorder.ondataavailable = async (e) => {
                 if (e.data.size > 0) {
-                    if (!this._headerSent) {
-                        // 第一个分片 = 文件头 + 少量音频，整个作为初始化段
+                    // 第一个分片包含 webm 文件头，保存它
+                    if (this._initSegment === null) {
                         this._initSegment = await e.data.arrayBuffer();
-                        this._headerSent = true;
-                        console.log(`[AudioRecorder] 初始化段: ${this._initSegment.byteLength} bytes`);
-                    } else {
-                        // 后续分片：只保存增量数据
-                        this.chunks.push(e.data);
                     }
+                    this.chunks.push(e.data);
                 }
             };
 
-            // 每 chunkInterval 毫秒触发一次 ondataavailable
             this.mediaRecorder.start(this.chunkInterval);
             this.isRecording = true;
-
-            // 开始音量分析
             this._startVolumeAnalysis();
 
             return true;
 
         } catch (err) {
-            // 用户取消选择屏幕时不报错
             if (err.name === 'NotAllowedError') {
                 return false;
             }
@@ -207,46 +175,38 @@ class AudioRecorder {
         }
 
         this.chunks = [];
+        this._initSegment = null;
     }
 
     /**
      * 获取当前音频块并发送
-     * 第一次返回初始化段（webm 文件头 + 首段音频）
-     * 后续每次只返回新增的音频分片
+     * 每次都拼接 initSegment + 新增 chunks，形成完整的 webm 文件
      */
     flushChunks() {
         const threshold = this.audioSource === 'system' ? this._systemVadThreshold : this.vadThreshold;
         const volume = this._currentVolume || 0;
 
-        this._chunkIndex++;
+        if (this.chunks.length === 0) return null;
 
-        // 第一次 flush：发送初始化段（含文件头 + 首段音频）
-        if (this._chunkIndex === 1 && this._initSegment) {
-            const blob = new Blob([this._initSegment], { type: this._getSupportedMimeType() });
-            console.log(`[AudioRecorder] flush #1 (init): size=${blob.size}`);
-            return blob;
+        // 拼接所有新增 chunk
+        const rawBlob = new Blob(this.chunks, { type: this._getSupportedMimeType() });
+        this.chunks = [];
+
+        // 拼接初始化段，形成完整可解码的 webm
+        let finalBlob;
+        if (this._initSegment) {
+            finalBlob = new Blob([this._initSegment, rawBlob], { type: rawBlob.type });
+        } else {
+            finalBlob = rawBlob;
         }
-
-        // 后续 flush：只发送新增的增量分片
-        const count = this.chunks.length;
-        if (count === 0) return null;
-
-        const blob = new Blob(this.chunks, { type: this._getSupportedMimeType() });
-        this.chunks = []; // 清空，下次只拿新增的
-
-        console.log(`[AudioRecorder] flush #${this._chunkIndex}: newChunks=${count}, vol=${volume.toFixed(4)}, size=${blob.size}`);
 
         if (volume > threshold) {
-            return blob;
+            return finalBlob;
         }
 
-        console.log(`[AudioRecorder] 音量过低，跳过`);
         return null;
     }
 
-    /**
-     * 获取支持的 MIME 类型
-     */
     _getSupportedMimeType() {
         const types = [
             'audio/webm;codecs=opus',
@@ -254,50 +214,30 @@ class AudioRecorder {
             'audio/ogg;codecs=opus',
             'audio/mp4',
         ];
-
         for (const type of types) {
-            if (MediaRecorder.isTypeSupported(type)) {
-                return type;
-            }
+            if (MediaRecorder.isTypeSupported(type)) return type;
         }
-
-        return ''; // 让浏览器选择默认
+        return '';
     }
 
-    /**
-     * 音量分析（用于可视化和 VAD）
-     */
     _startVolumeAnalysis() {
         this._currentVolume = 0;
         const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
-
         const analyse = () => {
             if (!this.isRecording) return;
-
             this.analyser.getByteFrequencyData(dataArray);
-
-            // 计算平均音量 (0-1)
             let sum = 0;
-            for (let i = 0; i < dataArray.length; i++) {
-                sum += dataArray[i];
-            }
+            for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
             this._currentVolume = sum / dataArray.length / 255;
-
             this.onVolumeChange(this._currentVolume, dataArray);
-
             this._analyseTimer = requestAnimationFrame(analyse);
         };
-
         analyse();
     }
 
-    /**
-     * 获取当前音量
-     */
     getVolume() {
         return this._currentVolume || 0;
     }
 }
 
-// 导出
 window.AudioRecorder = AudioRecorder;
