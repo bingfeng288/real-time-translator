@@ -33,7 +33,6 @@
         // 音频输入源
         sourceMic: document.getElementById('sourceMic'),
         sourceSystem: document.getElementById('sourceSystem'),
-        audioDeviceSelect: document.getElementById('audioDeviceSelect'),
         audioSourceHint: document.getElementById('audioSourceHint'),
     };
 
@@ -187,7 +186,7 @@
     async function startRecording() {
         const ok = await recorder.start();
         if (!ok) {
-            // 错误已在 recorder.onError 中处理
+            // 用户取消选择屏幕时静默处理，其他错误已在 recorder.onError 中 showToast
             return;
         }
 
@@ -199,7 +198,6 @@
         // 禁用音频源切换
         elements.sourceMic.disabled = true;
         elements.sourceSystem.disabled = true;
-        elements.audioDeviceSelect.disabled = true;
 
         // 启动定时发送
         startChunkSender();
@@ -217,7 +215,6 @@
         // 启用音频源切换
         elements.sourceMic.disabled = false;
         elements.sourceSystem.disabled = false;
-        elements.audioDeviceSelect.disabled = false;
 
         // 停止定时发送
         stopChunkSender();
@@ -317,7 +314,7 @@
             position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
             padding: 12px 24px; border-radius: 8px; z-index: 1000;
             font-size: 0.9rem; color: #fff;
-            background: ${type === 'error' ? '#ff4757' : '#2ed573'};
+            background: ${type === 'error' ? '#ff4757' : type === 'info' ? '#1e90ff' : '#2ed573'};
             box-shadow: 0 4px 20px rgba(0,0,0,0.3);
             animation: slideIn 0.3s ease-out;
         `;
@@ -430,54 +427,6 @@
     // 音频输入源切换
     // ============================================================
     let currentAudioSource = 'microphone';
-    let cachedDevices = null;
-
-    async function loadAudioDevices() {
-        cachedDevices = await AudioRecorder.enumerateDevices();
-
-        // 填充设备下拉
-        const sel = elements.audioDeviceSelect;
-        sel.innerHTML = '';
-
-        if (currentAudioSource === 'microphone') {
-            // 显示所有麦克风设备
-            if (cachedDevices.microphones.length === 0) {
-                sel.innerHTML = '<option value="">未检测到麦克风</option>';
-            } else {
-                cachedDevices.microphones.forEach((d, i) => {
-                    const opt = document.createElement('option');
-                    opt.value = d.deviceId;
-                    opt.textContent = d.label || `麦克风 ${i + 1}`;
-                    sel.appendChild(opt);
-                });
-            }
-            elements.audioSourceHint.textContent = '';
-            elements.audioSourceHint.className = 'audio-source-hint';
-        } else {
-            // 显示系统声音设备
-            if (cachedDevices.systemAudios.length === 0) {
-                sel.innerHTML = '<option value="">未检测到虚拟音频设备</option>';
-                elements.audioSourceHint.textContent =
-                    '需要安装虚拟音频设备才能采集系统声音。macOS: brew install blackhole-2ch，安装后重启浏览器';
-                elements.audioSourceHint.className = 'audio-source-hint warning';
-            } else {
-                cachedDevices.systemAudios.forEach((d, i) => {
-                    const opt = document.createElement('option');
-                    opt.value = d.deviceId;
-                    opt.textContent = d.label || `系统音频 ${i + 1}`;
-                    sel.appendChild(opt);
-                });
-                elements.audioSourceHint.textContent = '选择要采集的虚拟音频设备';
-                elements.audioSourceHint.className = 'audio-source-hint';
-            }
-        }
-
-        // 多于 1 个设备时显示下拉
-        const count = currentAudioSource === 'microphone'
-            ? cachedDevices.microphones.length
-            : cachedDevices.systemAudios.length;
-        sel.style.display = count > 1 ? 'block' : 'none';
-    }
 
     function switchAudioSource(source) {
         if (isRecording) {
@@ -494,27 +443,32 @@
         // 更新录音器
         recorder.setSource(source);
 
-        // 重新加载设备列表
-        loadAudioDevices();
+        // 更新提示文字和录音按钮图标
+        if (source === 'system') {
+            elements.audioSourceHint.textContent = '点击录音后选择要共享的屏幕或标签页，记得勾选「共享音频」';
+            elements.audioSourceHint.className = 'audio-source-hint';
+            elements.recordIcon.textContent = '🔊';
+        } else {
+            elements.audioSourceHint.textContent = '';
+            elements.audioSourceHint.className = 'audio-source-hint';
+            elements.recordIcon.textContent = '🎤';
+        }
     }
+
+    // 系统声音共享结束时自动停止
+    recorder.onSystemAudioEnded = () => {
+        stopRecording();
+        showToast('屏幕共享已结束', 'info');
+    };
 
     // 音频源按钮事件
     elements.sourceMic.addEventListener('click', () => switchAudioSource('microphone'));
     elements.sourceSystem.addEventListener('click', () => switchAudioSource('system'));
-
-    // 设备下拉切换
-    elements.audioDeviceSelect.addEventListener('change', () => {
-        const deviceId = elements.audioDeviceSelect.value;
-        if (deviceId) {
-            recorder.setSource(deviceId);
-        }
-    });
 
     // ============================================================
     // 启动
     // ============================================================
     connect();
     fetchWhisperConfig();
-    loadAudioDevices();
 
 })();

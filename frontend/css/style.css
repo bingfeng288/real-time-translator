@@ -293,24 +293,6 @@ body {
     font-size: 1.1rem;
 }
 
-.audio-device-select {
-    width: 100%;
-    max-width: 400px;
-    padding: 8px 12px;
-    background: var(--bg-card);
-    color: var(--text-primary);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    font-size: 0.85rem;
-    cursor: pointer;
-    outline: none;
-    transition: border-color 0.2s;
-}
-
-.audio-device-select:focus {
-    border-color: var(--accent);
-}
-
 .audio-source-hint {
     font-size: 0.75rem;
     color: var(--text-secondary);

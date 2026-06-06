@@ -2,10 +2,9 @@
  * 音频录制器
  * 负责麦克风 / 系统声音采集、浏览器端 VAD、音频分块发送
  *
- * 系统声音采集需要安装虚拟音频设备：
- *   macOS: BlackHole (brew install blackhole-2ch) 或 LoopBack
- *   Windows: VB-Audio Virtual Cable
- *   Linux: PulseAudio monitor
+ * 系统声音采集方案：
+ *   使用浏览器原生 getDisplayMedia API，用户选择"共享标签页"或"共享屏幕"并勾选"共享音频"
+ *   零安装零配置，Chrome / Edge / Firefox 均支持
  */
 
 class AudioRecorder {
@@ -26,113 +25,28 @@ class AudioRecorder {
 
         // 音频输入源：'microphone' 或 'system'
         this.audioSource = options.audioSource || 'microphone';
-        // 指定设备 ID（可选，优先级高于 audioSource）
-        this.deviceId = options.deviceId || null;
 
         this._chunkTimer = null;
         this._analyseTimer = null;
     }
 
     /**
-     * 枚举所有可用的音频输入设备
-     * @returns {Promise<{microphones: [], systemAudios: [], all: []}>}
-     */
-    static async enumerateDevices() {
-        try {
-            // 先请求一次权限，否则部分浏览器不返回设备标签
-            const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            tempStream.getTracks().forEach(t => t.stop());
-
-            const devices = await navigator.mediaDevices.enumerateDevices();
-            const audioInputs = devices.filter(d => d.kind === 'audioinput');
-
-            // 系统声音设备的关键词
-            const systemKeywords = [
-                'blackhole', 'soundflower', 'loopback', 'virtual',
-                'screen capture', 'screen capture', 'monitor',
-                'stereo mix', 'what u hear', 'wave out mix',
-                'vb-audio', 'cable output', 'cable input',
-                'pulseaudio', 'pipewire',
-            ];
-
-            const microphones = [];
-            const systemAudios = [];
-
-            for (const device of audioInputs) {
-                const label = (device.label || '').toLowerCase();
-                const isSystem = systemKeywords.some(kw => label.includes(kw));
-
-                const info = {
-                    deviceId: device.deviceId,
-                    label: device.label || `音频输入 ${microphones.length + systemAudios.length + 1}`,
-                    group: device.groupId,
-                };
-
-                if (isSystem) {
-                    systemAudios.push(info);
-                } else {
-                    microphones.push(info);
-                }
-            }
-
-            return { microphones, systemAudios, all: audioInputs };
-
-        } catch (err) {
-            console.error('枚举音频设备失败:', err);
-            return { microphones: [], systemAudios: [], all: [] };
-        }
-    }
-
-    /**
      * 设置音频输入源
-     * @param {'microphone'|'system'|string} source - 'microphone', 'system', 或具体 deviceId
+     * @param {'microphone'|'system'} source
      */
     setSource(source) {
         if (this.isRecording) {
             this.onError(new Error('请先停止录音再切换音频源'));
             return;
         }
-
-        if (source === 'microphone' || source === 'system') {
-            this.audioSource = source;
-            this.deviceId = null;
-        } else {
-            // 指定 deviceId
-            this.deviceId = source;
-            this.audioSource = 'custom';
-        }
+        this.audioSource = source;
     }
 
     /**
-     * 获取音频流约束
+     * 麦克风录音（getUserMedia）
      */
-    _getAudioConstraints() {
-        // 指定了具体设备 ID
-        if (this.deviceId) {
-            return {
-                audio: {
-                    deviceId: { exact: this.deviceId },
-                    sampleRate: this.sampleRate,
-                    channelCount: 1,
-                },
-            };
-        }
-
-        // 系统声音：不使用回声消除/降噪（会破坏系统音频质量）
-        if (this.audioSource === 'system') {
-            return {
-                audio: {
-                    sampleRate: this.sampleRate,
-                    channelCount: 1,
-                    echoCancellation: false,
-                    noiseSuppression: false,
-                    autoGainControl: false,
-                },
-            };
-        }
-
-        // 默认麦克风
-        return {
+    async _startMicrophone() {
+        this.stream = await navigator.mediaDevices.getUserMedia({
             audio: {
                 sampleRate: this.sampleRate,
                 channelCount: 1,
@@ -140,7 +54,63 @@ class AudioRecorder {
                 noiseSuppression: true,
                 autoGainControl: true,
             },
-        };
+        });
+    }
+
+    /**
+     * 系统声音录音（getDisplayMedia + 只保留音频轨道）
+     *
+     * 浏览器会弹出一个选择框，让用户选择共享哪个屏幕/标签页，
+     * 用户需要勾选"共享音频"选项。
+     * macOS 注意：系统设置 → 声音 → 输出 不能设为 BlackHole 等虚拟设备，
+     *            需要是实际的扬声器/耳机，否则 getDisplayMedia 可能采集不到。
+     */
+    async _startSystemAudio() {
+        // getDisplayMedia 必须同时请求视频（浏览器规范要求），
+        // 我们拿到流后丢弃视频轨道，只保留音频。
+        const displayStream = await navigator.mediaDevices.getDisplayMedia({
+            video: {
+                // 使用最小分辨率，减少性能开销
+                width: 1,
+                height: 1,
+                frameRate: 1,
+            },
+            audio: {
+                sampleRate: this.sampleRate,
+                channelCount: 1,
+                echoCancellation: false,
+                noiseSuppression: false,
+                autoGainControl: false,
+            },
+        });
+
+        // 检查是否包含音频轨道
+        const audioTracks = displayStream.getAudioTracks();
+        if (audioTracks.length === 0) {
+            // 用户没有勾选"共享音频"
+            displayStream.getTracks().forEach(t => t.stop());
+            throw new Error(
+                '未检测到音频。请在共享时勾选「共享音频」选项。\n' +
+                '提示：选择共享"标签页"效果最佳。'
+            );
+        }
+
+        // 丢弃视频轨道，只保留音频
+        displayStream.getVideoTracks().forEach(t => t.stop());
+
+        // 用纯音频轨道创建新流
+        this.stream = new MediaStream(audioTracks);
+
+        // 监听用户通过浏览器 UI 停止共享
+        audioTracks[0].addEventListener('ended', () => {
+            if (this.isRecording) {
+                this.onError(new Error('共享已结束'));
+                // 触发停止
+                if (typeof this.onSystemAudioEnded === 'function') {
+                    this.onSystemAudioEnded();
+                }
+            }
+        });
     }
 
     /**
@@ -148,24 +118,11 @@ class AudioRecorder {
      */
     async start() {
         try {
-            const constraints = this._getAudioConstraints();
-
-            // 如果是系统声音且没有指定 deviceId，尝试自动查找虚拟音频设备
-            if (this.audioSource === 'system' && !this.deviceId) {
-                const devices = await AudioRecorder.enumerateDevices();
-                if (devices.systemAudios.length > 0) {
-                    constraints.audio.deviceId = { exact: devices.systemAudios[0].deviceId };
-                } else {
-                    this.onError(new Error(
-                        '未检测到虚拟音频设备。\n' +
-                        '请安装 BlackHole (macOS)、VB-Audio (Windows) 或配置 PulseAudio monitor (Linux)。\n' +
-                        'macOS 安装: brew install blackhole-2ch'
-                    ));
-                    return false;
-                }
+            if (this.audioSource === 'system') {
+                await this._startSystemAudio();
+            } else {
+                await this._startMicrophone();
             }
-
-            this.stream = await navigator.mediaDevices.getUserMedia(constraints);
 
             // 创建 AudioContext 用于音量分析
             this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -199,6 +156,10 @@ class AudioRecorder {
             return true;
 
         } catch (err) {
+            // 用户取消选择屏幕时不报错
+            if (err.name === 'NotAllowedError') {
+                return false;
+            }
             this.onError(err);
             return false;
         }
