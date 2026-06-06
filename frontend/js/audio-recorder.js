@@ -148,15 +148,19 @@ class AudioRecorder {
             this.chunks = [];
             this._initSegment = null;
             this._chunkIndex = 0;
+            this._headerSent = false;
 
             this.mediaRecorder.ondataavailable = async (e) => {
                 if (e.data.size > 0) {
-                    // 第一个分片包含 webm 文件头（初始化段），保存它
-                    if (this._initSegment === null) {
+                    if (!this._headerSent) {
+                        // 第一个分片 = 文件头 + 少量音频，整个作为初始化段
                         this._initSegment = await e.data.arrayBuffer();
-                        console.log(`[AudioRecorder] 保存初始化段: ${this._initSegment.byteLength} bytes`);
+                        this._headerSent = true;
+                        console.log(`[AudioRecorder] 初始化段: ${this._initSegment.byteLength} bytes`);
+                    } else {
+                        // 后续分片：只保存增量数据
+                        this.chunks.push(e.data);
                     }
-                    this.chunks.push(e.data);
                 }
             };
 
@@ -207,37 +211,42 @@ class AudioRecorder {
 
     /**
      * 获取当前音频块并发送
-     * 每次都拼接初始化段 + 音频数据，确保 ffmpeg 能完整解码
+     * 第一次返回完整初始化段（含文件头+首段音频）
+     * 后续每次返回 初始化段 + 新增音频增量
      */
     flushChunks() {
-        const chunkCount = this.chunks.length;
-        if (chunkCount === 0) return null;
-
         // 根据音频源选择 VAD 阈值
         const threshold = this.audioSource === 'system' ? this._systemVadThreshold : this.vadThreshold;
         const volume = this._currentVolume || 0;
 
-        // 拼接所有 chunk
-        const rawBlob = new Blob(this.chunks, { type: this._getSupportedMimeType() });
-        this.chunks = [];
-
-        // 每次都拼接初始化段，让 ffmpeg 能识别格式
-        let finalBlob;
-        if (this._initSegment && this._chunkIndex > 0) {
-            finalBlob = new Blob([this._initSegment, rawBlob], { type: rawBlob.type });
-        } else {
-            finalBlob = rawBlob;
-        }
         this._chunkIndex++;
 
-        console.log(`[AudioRecorder] flush #${this._chunkIndex}: chunks=${chunkCount}, vol=${volume.toFixed(4)}, thr=${threshold}, size=${finalBlob.size}, src=${this.audioSource}`);
+        // 第一次 flush：发送初始化段（它已经包含首段音频）
+        if (this._chunkIndex === 1 && this._initSegment) {
+            const blob = new Blob([this._initSegment], { type: this._getSupportedMimeType() });
+            console.log(`[AudioRecorder] flush #1 (init): vol=${volume.toFixed(4)}, size=${blob.size}`);
+            return blob;
+        }
 
-        // 检测是否有声音（基于音量）
+        // 后续 flush：发送 init + 新增增量
+        const newChunkCount = this.chunks.length;
+        if (newChunkCount === 0) return null;
+
+        const rawBlob = new Blob(this.chunks, { type: this._getSupportedMimeType() });
+        this.chunks = []; // 清空，下次只拿新增的
+
+        // 拼接初始化段确保格式完整
+        const finalBlob = this._initSegment
+            ? new Blob([this._initSegment, rawBlob], { type: rawBlob.type })
+            : rawBlob;
+
+        console.log(`[AudioRecorder] flush #${this._chunkIndex}: newChunks=${newChunkCount}, vol=${volume.toFixed(4)}, size=${finalBlob.size}`);
+
         if (volume > threshold) {
             return finalBlob;
         }
 
-        console.log(`[AudioRecorder] 音量过低 (${volume.toFixed(4)} < ${threshold})，跳过`);
+        console.log(`[AudioRecorder] 音量过低，跳过`);
         return null;
     }
 
