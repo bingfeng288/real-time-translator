@@ -84,6 +84,24 @@
             </div>
         </div>
 
+        <!-- 音频输入源选择 -->
+        <div class="audio-source-section">
+            <div class="audio-source-toggle">
+                <button class="source-btn active" id="sourceMic" title="识别麦克风声音">
+                    <span class="source-icon">🎤</span>
+                    <span class="source-label">麦克风</span>
+                </button>
+                <button class="source-btn" id="sourceSystem" title="识别系统内声音（需要虚拟音频设备）">
+                    <span class="source-icon">🔊</span>
+                    <span class="source-label">系统声音</span>
+                </button>
+            </div>
+            <select id="audioDeviceSelect" class="audio-device-select" style="display:none">
+                <!-- 动态填充 -->
+            </select>
+            <div class="audio-source-hint" id="audioSourceHint"></div>
+        </div>
+
         <!-- 录音按钮 -->
         <div class="record-section">
             <button class="record-btn" id="recordBtn">

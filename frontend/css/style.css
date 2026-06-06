@@ -248,6 +248,81 @@ body {
     border-color: var(--accent);
 }
 
+/* Audio Source Selector */
+.audio-source-section {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin-bottom: 16px;
+    gap: 10px;
+}
+
+.audio-source-toggle {
+    display: flex;
+    background: var(--bg-secondary);
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+}
+
+.source-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 20px;
+    background: transparent;
+    color: var(--text-secondary);
+    border: none;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-size: 0.9rem;
+}
+
+.source-btn:hover:not(.active) {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.source-btn.active {
+    background: var(--accent);
+    color: var(--bg-primary);
+    font-weight: 600;
+}
+
+.source-icon {
+    font-size: 1.1rem;
+}
+
+.audio-device-select {
+    width: 100%;
+    max-width: 400px;
+    padding: 8px 12px;
+    background: var(--bg-card);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+.audio-device-select:focus {
+    border-color: var(--accent);
+}
+
+.audio-source-hint {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    text-align: center;
+    max-width: 400px;
+    line-height: 1.4;
+}
+
+.audio-source-hint.warning {
+    color: #ffa502;
+}
+
 /* Record Button */
 .record-section {
     display: flex;
