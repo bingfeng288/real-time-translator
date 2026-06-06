@@ -180,28 +180,26 @@ class AudioRecorder {
 
     /**
      * 获取当前音频块并发送
-     * 每次都拼接 initSegment + 新增 chunks，形成完整的 webm 文件
+     * 每次只发送 initSegment + 本轮新增的 chunks（不累积旧数据）
      */
     flushChunks() {
         const threshold = this.audioSource === 'system' ? this._systemVadThreshold : this.vadThreshold;
         const volume = this._currentVolume || 0;
 
-        if (this.chunks.length === 0) return null;
+        // 取出并清空本轮 chunks
+        const newChunks = this.chunks.splice(0);
+        if (newChunks.length === 0) return null;
 
-        // 拼接所有新增 chunk
-        const rawBlob = new Blob(this.chunks, { type: this._getSupportedMimeType() });
-        this.chunks = [];
-
-        // 拼接初始化段，形成完整可解码的 webm
-        let finalBlob;
+        // 拼接 init + 本轮新增 → 独立完整的 webm
+        let blob;
         if (this._initSegment) {
-            finalBlob = new Blob([this._initSegment, rawBlob], { type: rawBlob.type });
+            blob = new Blob([this._initSegment, ...newChunks], { type: this._getSupportedMimeType() });
         } else {
-            finalBlob = rawBlob;
+            blob = new Blob(newChunks, { type: this._getSupportedMimeType() });
         }
 
         if (volume > threshold) {
-            return finalBlob;
+            return blob;
         }
 
         return null;

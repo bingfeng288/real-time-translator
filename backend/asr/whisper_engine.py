@@ -17,7 +17,7 @@ class WhisperEngine(ASREngine):
 
     # 设备 -> 推荐模型大小
     AUTO_MODEL_RECOMMENDATIONS = {
-        "mps":  "small",   # Apple Silicon 推荐 small
+        "mps":  "base",    # Apple Silicon 推荐 base（small 在 MPS 上较慢）
         "cuda": "medium",  # NVIDIA GPU 推荐 medium
         "cpu":  "tiny",    # CPU 推荐 tiny
     }
