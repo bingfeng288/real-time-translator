@@ -40,7 +40,7 @@ FUNASR_MODEL_DIR = MODEL_DIR / "funasr"
 # ============================================================
 # 翻译配置 (Hy-MT2-1.8B)
 # ============================================================
-TRANSLATION_MODEL_ID = "Tencent-Hunyuan/Hy-MT2-1.8B"
+TRANSLATION_MODEL_ID = "tencent/Hy-MT2-1.8B"
 TRANSLATION_MODEL_DIR = MODEL_DIR / "hy-mt2"
 
 # 支持的语言映射（ISO 639-1 -> 模型语言名）
