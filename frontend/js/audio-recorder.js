@@ -31,6 +31,10 @@ class AudioRecorder {
 
         // 系统音频音量通常较低，使用更低的 VAD 阈值
         this._systemVadThreshold = 0.002;
+
+        // 保存 webm 初始化段（文件头），后续每个分片都需要带上它才能被 ffmpeg 解码
+        this._initSegment = null;
+        this._chunkIndex = 0;
     }
 
     /**
@@ -142,9 +146,16 @@ class AudioRecorder {
             });
 
             this.chunks = [];
+            this._initSegment = null;
+            this._chunkIndex = 0;
 
-            this.mediaRecorder.ondataavailable = (e) => {
+            this.mediaRecorder.ondataavailable = async (e) => {
                 if (e.data.size > 0) {
+                    // 第一个分片包含 webm 文件头（初始化段），保存它
+                    if (this._initSegment === null) {
+                        this._initSegment = await e.data.arrayBuffer();
+                        console.log(`[AudioRecorder] 保存初始化段: ${this._initSegment.byteLength} bytes`);
+                    }
                     this.chunks.push(e.data);
                 }
             };
@@ -196,26 +207,37 @@ class AudioRecorder {
 
     /**
      * 获取当前音频块并发送
+     * 每次都拼接初始化段 + 音频数据，确保 ffmpeg 能完整解码
      */
     flushChunks() {
         const chunkCount = this.chunks.length;
         if (chunkCount === 0) return null;
 
-        const blob = new Blob(this.chunks, { type: this._getSupportedMimeType() });
-        this.chunks = [];
-
         // 根据音频源选择 VAD 阈值
         const threshold = this.audioSource === 'system' ? this._systemVadThreshold : this.vadThreshold;
+        const volume = this._currentVolume || 0;
 
-        // 调试日志
-        console.log(`[AudioRecorder] flush: chunkCount=${chunkCount}, volume=${(this._currentVolume || 0).toFixed(4)}, threshold=${threshold}, source=${this.audioSource}, blobSize=${blob.size}`);
+        // 拼接所有 chunk
+        const rawBlob = new Blob(this.chunks, { type: this._getSupportedMimeType() });
+        this.chunks = [];
+
+        // 每次都拼接初始化段，让 ffmpeg 能识别格式
+        let finalBlob;
+        if (this._initSegment && this._chunkIndex > 0) {
+            finalBlob = new Blob([this._initSegment, rawBlob], { type: rawBlob.type });
+        } else {
+            finalBlob = rawBlob;
+        }
+        this._chunkIndex++;
+
+        console.log(`[AudioRecorder] flush #${this._chunkIndex}: chunks=${chunkCount}, vol=${volume.toFixed(4)}, thr=${threshold}, size=${finalBlob.size}, src=${this.audioSource}`);
 
         // 检测是否有声音（基于音量）
-        if ((this._currentVolume || 0) > threshold) {
-            return blob;
+        if (volume > threshold) {
+            return finalBlob;
         }
 
-        console.log(`[AudioRecorder] 音量过低，跳过此块`);
+        console.log(`[AudioRecorder] 音量过低 (${volume.toFixed(4)} < ${threshold})，跳过`);
         return null;
     }
 

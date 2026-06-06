@@ -51,38 +51,38 @@ class AudioProcessor:
         target_sample_rate = target_sample_rate or config.AUDIO_SAMPLE_RATE
 
         try:
-            # 通过 stdin 管道喂给 ffmpeg，输出 raw PCM 到 stdout
-            cmd = [
-                "ffmpeg", "-y",
-                "-f", source_format,       # 指定输入格式
-                "-i", "pipe:0",            # 从 stdin 读取
-                "-ar", str(target_sample_rate),
-                "-ac", str(config.AUDIO_CHANNELS),
-                "-sample_fmt", "s16",
-                "-f", "s16le",             # 输出 raw 16-bit PCM
-                "pipe:1",                  # 写到 stdout
-            ]
+            # 尝试多种格式解析（浏览器 MediaRecorder 输出的 webm 可能不标准）
+            formats_to_try = ["matroska", "webm", "ogg"]
 
-            result = subprocess.run(
-                cmd,
-                input=audio_bytes,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=10,
-            )
+            for fmt in formats_to_try:
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-f", fmt,
+                    "-i", "pipe:0",
+                    "-ar", str(target_sample_rate),
+                    "-ac", str(config.AUDIO_CHANNELS),
+                    "-sample_fmt", "s16",
+                    "-f", "s16le",
+                    "pipe:1",
+                ]
 
-            if result.returncode != 0:
-                # 只在非格式错误时打印日志（避免刷屏）
-                err = result.stderr.decode(errors="replace")
-                if "Invalid data found" not in err:
-                    logger.error(f"ffmpeg 解码失败: {err[-200:]}")
-                return np.array([], dtype=np.float32)
+                result = subprocess.run(
+                    cmd,
+                    input=audio_bytes,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=10,
+                )
 
-            # 将 raw PCM bytes 转为 numpy array
-            pcm_data = np.frombuffer(result.stdout, dtype=np.int16).astype(np.float32)
-            pcm_data = pcm_data / 32768.0  # 归一化到 [-1, 1]
+                if result.returncode == 0 and len(result.stdout) > 0:
+                    # 成功解码
+                    pcm_data = np.frombuffer(result.stdout, dtype=np.int16).astype(np.float32)
+                    pcm_data = pcm_data / 32768.0
+                    return pcm_data
 
-            return pcm_data
+            # 所有格式都失败
+            logger.debug(f"所有格式解码失败 ({', '.join(formats_to_try)}), data_size={len(audio_bytes)}")
+            return np.array([], dtype=np.float32)
 
         except Exception as e:
             logger.error(f"音频解码失败: {e}")
