@@ -195,6 +195,8 @@ async def update_config(data: dict):
 # ============================================================
 @app.websocket("/ws/translate")
 async def websocket_translate(websocket: WebSocket):
+    global asr_engine, translator
+
     """
     实时语音翻译 WebSocket
 
@@ -258,7 +260,6 @@ async def websocket_translate(websocket: WebSocket):
                             new_engine = data["asr_engine"]
                             if new_engine != config.ASR_ENGINE:
                                 try:
-                                    global asr_engine
                                     asr_engine = get_asr_engine(new_engine)
                                     asr_engine.load_model()
                                     config.ASR_ENGINE = new_engine
