@@ -28,6 +28,9 @@ class AudioRecorder {
 
         this._chunkTimer = null;
         this._analyseTimer = null;
+
+        // 系统音频音量通常较低，使用更低的 VAD 阈值
+        this._systemVadThreshold = 0.002;
     }
 
     /**
@@ -195,16 +198,24 @@ class AudioRecorder {
      * 获取当前音频块并发送
      */
     flushChunks() {
-        if (this.chunks.length === 0) return null;
+        const chunkCount = this.chunks.length;
+        if (chunkCount === 0) return null;
 
         const blob = new Blob(this.chunks, { type: this._getSupportedMimeType() });
         this.chunks = [];
 
+        // 根据音频源选择 VAD 阈值
+        const threshold = this.audioSource === 'system' ? this._systemVadThreshold : this.vadThreshold;
+
+        // 调试日志
+        console.log(`[AudioRecorder] flush: chunkCount=${chunkCount}, volume=${(this._currentVolume || 0).toFixed(4)}, threshold=${threshold}, source=${this.audioSource}, blobSize=${blob.size}`);
+
         // 检测是否有声音（基于音量）
-        if (this._currentVolume > this.vadThreshold) {
+        if ((this._currentVolume || 0) > threshold) {
             return blob;
         }
 
+        console.log(`[AudioRecorder] 音量过低，跳过此块`);
         return null;
     }
 

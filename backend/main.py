@@ -307,6 +307,8 @@ async def websocket_translate(websocket: WebSocket):
                 audio_bytes = message["bytes"]
                 start_time = time.time()
 
+                logger.debug(f"收到音频数据: {len(audio_bytes)} bytes")
+
                 try:
                     # 1. 解码音频
                     audio_data = audio_processor.decode_audio(
@@ -314,7 +316,10 @@ async def websocket_translate(websocket: WebSocket):
                     )
 
                     if len(audio_data) == 0:
+                        logger.debug("解码后音频为空，跳过")
                         continue
+
+                    logger.debug(f"解码完成: {len(audio_data)} samples, max={np.abs(audio_data).max():.4f}")
 
                     # 2. 语音识别
                     if asr_engine is None or not asr_engine.is_loaded():
