@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#00d4ff"/>
+      <stop offset="100%" style="stop-color:#7b68ee"/>
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="32" r="30" fill="#0f0f0f" stroke="url(#g)" stroke-width="3"/>
+  <g fill="url(#g)">
+    <!-- 麦克风 -->
+    <rect x="27" y="14" width="10" height="20" rx="5"/>
+    <path d="M21 28 a11 11 0 0 0 22 0" fill="none" stroke="url(#g)" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="32" y1="39" x2="32" y2="45" stroke="url(#g)" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="26" y1="45" x2="38" y2="45" stroke="url(#g)" stroke-width="2.5" stroke-linecap="round"/>
+    <!-- 翻译气泡 -->
+    <rect x="38" y="6" width="20" height="14" rx="4" fill="url(#g)" opacity="0.9"/>
+    <polygon points="38,16 42,20 42,16" fill="url(#g)" opacity="0.9"/>
+    <text x="48" y="17" text-anchor="middle" fill="#0f0f0f" font-size="9" font-weight="bold" font-family="sans-serif">A文</text>
+  </g>
+</svg>
