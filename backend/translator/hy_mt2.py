@@ -17,13 +17,19 @@ class HyMT2Translator:
     支持中、英、日、韩、法、德、西、葡、俄等多语言。
     """
 
-    # 翻译 prompt 模板
+    # 翻译 prompt 模板（更明确的指令，提高准确度）
     PROMPT_TEMPLATES = {
-        "translate": "Translate the following text from {source} to {target}:\n{text}\nTranslation:",
-        "translate_zh_to_en": "将以下中文翻译为英文：\n{text}\n英文翻译：",
-        "translate_en_to_zh": "Translate the following English text to Chinese:\n{text}\n中文翻译：",
-        "translate_zh_to_ja": "将以下中文翻译为日文：\n{text}\n日本語翻訳：",
-        "translate_ja_to_zh": "以下の日本語を中国語に翻訳してください：\n{text}\n中文翻訳：",
+        "translate": "Translate the following {source} text to {target}. Only output the translation, nothing else.\n\n{text}",
+        "translate_zh_to_en": "将以下中文翻译为地道的英文。只输出翻译结果，不要添加任何解释。\n\n{text}",
+        "translate_en_to_zh": "将以下英文翻译为流畅的中文。只输出翻译结果，不要添加任何解释。\n\n{text}",
+        "translate_zh_to_ja": "将以下中文翻译为日文。只输出翻译结果。\n\n{text}",
+        "translate_ja_to_zh": "将以下日文翻译为中文。只输出翻译结果。\n\n{text}",
+        "translate_zh_to_ko": "将以下中文翻译为韩文。只输出翻译结果。\n\n{text}",
+        "translate_ko_to_zh": "将以下韩文翻译为中文。只输出翻译结果。\n\n{text}",
+        "translate_en_to_ja": "Translate the following English text to Japanese. Output only the translation.\n\n{text}",
+        "translate_ja_to_en": "Translate the following Japanese text to English. Output only the translation.\n\n{text}",
+        "translate_en_to_ko": "Translate the following English text to Korean. Output only the translation.\n\n{text}",
+        "translate_ko_to_en": "Translate the following Korean text to English. Output only the translation.\n\n{text}",
     }
 
     def __init__(
@@ -146,11 +152,11 @@ class HyMT2Translator:
 
             gen_kwargs = {
                 "max_new_tokens": config.TRANSLATION_MAX_NEW_TOKENS,
-                "do_sample": config.TRANSLATION_DO_SAMPLE,
+                "do_sample": False,  # 贪心解码，翻译更稳定
                 "pad_token_id": self._tokenizer.eos_token_id,
+                "repetition_penalty": 1.15,  # 避免重复输出
+                "no_repeat_ngram_size": 3,   # 禁止 3-gram 重复
             }
-            if config.TRANSLATION_TEMPERATURE is not None:
-                gen_kwargs["temperature"] = config.TRANSLATION_TEMPERATURE
 
             with torch.no_grad():
                 outputs = self._model.generate(**inputs, **gen_kwargs)
@@ -159,14 +165,44 @@ class HyMT2Translator:
             new_tokens = outputs[0][inputs["input_ids"].shape[-1]:]
             result = self._tokenizer.decode(new_tokens, skip_special_tokens=True)
 
-            # 清理结果（去除多余换行、prompt 残留等）
-            result = result.strip().split("\n")[0].strip()
+            # 清理结果
+            result = self._clean_translation(result)
 
             return result
 
         except Exception as e:
             logger.error(f"翻译失败: {e}")
             return ""
+
+    def _clean_translation(self, text: str) -> str:
+        """清理翻译结果，去除模型生成的噪音"""
+        if not text:
+            return ""
+
+        # 去除首尾空白
+        text = text.strip()
+
+        # 取第一行（模型有时会生成多行）
+        text = text.split("\n")[0].strip()
+
+        # 去除常见的 prompt 残留
+        for prefix in ["翻译：", "Translation:", "译文：", "输出：", "Output:", "答案："]:
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
+
+        # 去除引号包裹
+        if len(text) >= 2 and text[0] in ('"', '"', '「') and text[-1] in ('"', '"', '」'):
+            text = text[1:-1].strip()
+
+        # 过滤明显的垃圾输出（全是重复字符）
+        if len(text) > 3 and len(set(text)) <= 2:
+            return ""
+
+        # 过滤太短的无意义输出
+        if len(text) <= 1:
+            return ""
+
+        return text
 
     def is_loaded(self) -> bool:
         return self._model is not None

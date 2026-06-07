@@ -16,7 +16,7 @@ MODEL_DIR.mkdir(exist_ok=True)
 # ============================================================
 ASR_ENGINE = "whisper"  # "whisper" 或 "funasr"
 
-WHISPER_MODEL_SIZE = "base"  # tiny / base / small / medium / large
+WHISPER_MODEL_SIZE = "small"  # tiny / base / small / medium / large（small 精度更高）
 WHISPER_MODEL_DIR = MODEL_DIR / "whisper"
 WHISPER_LANGUAGE = None  # None = 自动检测，或指定 "zh" / "en" / "ja" 等
 

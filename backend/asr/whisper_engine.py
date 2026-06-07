@@ -15,11 +15,11 @@ from .. import config
 class WhisperEngine(ASREngine):
     """OpenAI Whisper 语音识别引擎"""
 
-    # 设备 -> 推荐模型大小
+    # 设备 -> 推荐模型大小（精度优先）
     AUTO_MODEL_RECOMMENDATIONS = {
-        "mps":  "base",    # Apple Silicon 推荐 base（small 在 MPS 上较慢）
+        "mps":  "small",   # Apple Silicon 推荐 small（精度高，MPS 加速可接受）
         "cuda": "medium",  # NVIDIA GPU 推荐 medium
-        "cpu":  "tiny",    # CPU 推荐 tiny
+        "cpu":  "base",    # CPU 推荐 base
     }
 
     def __init__(
@@ -100,6 +100,9 @@ class WhisperEngine(ASREngine):
             device = WhisperEngine._detect_device()
         return WhisperEngine.AUTO_MODEL_RECOMMENDATIONS.get(device, "base")
 
+    # 上一次识别结果，用于上下文连贯
+    _last_text: str = ""
+
     def transcribe(
         self,
         audio_data: np.ndarray,
@@ -107,7 +110,7 @@ class WhisperEngine(ASREngine):
         language: Optional[str] = None,
     ) -> str:
         """
-        语音转文字
+        语音转文字（优化精度）
 
         Args:
             audio_data: float32 numpy array，值域 [-1, 1]
@@ -125,21 +128,52 @@ class WhisperEngine(ASREngine):
             audio_data = audio_data.astype(np.float32)
 
         # 归一化到 [-1, 1]
-        if np.abs(audio_data).max() > 1.0:
-            audio_data = audio_data / np.abs(audio_data).max()
+        max_val = np.abs(audio_data).max()
+        if max_val > 1.0:
+            audio_data = audio_data / max_val
+
+        # 过滤太短的音频（小于 0.3 秒大概率是噪音）
+        if len(audio_data) < sample_rate * 0.3:
+            return ""
+
+        lang = language or config.WHISPER_LANGUAGE
 
         options = {
             "fp16": self._device != "cpu",
-            "language": language or config.WHISPER_LANGUAGE,
+            "language": lang,
+            # 精度优化
+            "condition_on_previous_text": True,  # 利用上文提高连贯性
+            "no_speech_threshold": 0.6,           # 过滤静音/噪音
+            "compression_ratio_threshold": 2.4,   # 过滤重复乱码
+            "logprob_threshold": -1.0,            # 过滤低置信度
         }
+
+        # 提供上文作为初始 prompt，帮助 Whisper 理解语境
+        if self._last_text:
+            options["initial_prompt"] = self._last_text[-200:]  # 取最后 200 字符
 
         try:
             result = self._model.transcribe(audio_data, **options)
             text = result["text"].strip()
+
+            # 过滤 Whisper 返回的重复填充文本（常见于噪音输入）
+            if not text or text == self._last_text:
+                return ""
+
+            # 检测是否是重复字符的垃圾输出
+            if len(text) > 2 and len(set(text)) <= 2:
+                return ""
+
+            self._last_text = text
             return text
+
         except Exception as e:
             logger.error(f"Whisper 转录失败: {e}")
             return ""
+
+    def reset_context(self) -> None:
+        """重置上下文（切换语言或重新开始录音时调用）"""
+        self._last_text = ""
 
     def is_loaded(self) -> bool:
         return self._model is not None

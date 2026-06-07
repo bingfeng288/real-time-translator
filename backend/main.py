@@ -319,6 +319,10 @@ async def websocket_translate(websocket: WebSocket):
                     waiting_for_init = False
                     if decoder.start(audio_bytes):
                         logger.debug(f"解码器已启动, header={len(audio_bytes)} bytes")
+                        # 重置 ASR 上下文，避免旧文本干扰新录音
+                        if asr_engine and hasattr(asr_engine, 'reset_context'):
+                            asr_engine.reset_context()
+                        last_recognized_text = ""
                     else:
                         await websocket.send_json({"type": "error", "message": "解码器启动失败"})
                     continue
