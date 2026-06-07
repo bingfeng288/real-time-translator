@@ -17,19 +17,20 @@ class HyMT2Translator:
     支持中、英、日、韩、法、德、西、葡、俄等多语言。
     """
 
-    # 翻译 prompt 模板（更明确的指令，提高准确度）
+    # 翻译 prompt 模板
+    # 使用简洁的格式，避免模型续写
     PROMPT_TEMPLATES = {
-        "translate": "Translate the following {source} text to {target}. Only output the translation, nothing else.\n\n{text}",
-        "translate_zh_to_en": "将以下中文翻译为地道的英文。只输出翻译结果，不要添加任何解释。\n\n{text}",
-        "translate_en_to_zh": "将以下英文翻译为流畅的中文。只输出翻译结果，不要添加任何解释。\n\n{text}",
-        "translate_zh_to_ja": "将以下中文翻译为日文。只输出翻译结果。\n\n{text}",
-        "translate_ja_to_zh": "将以下日文翻译为中文。只输出翻译结果。\n\n{text}",
-        "translate_zh_to_ko": "将以下中文翻译为韩文。只输出翻译结果。\n\n{text}",
-        "translate_ko_to_zh": "将以下韩文翻译为中文。只输出翻译结果。\n\n{text}",
-        "translate_en_to_ja": "Translate the following English text to Japanese. Output only the translation.\n\n{text}",
-        "translate_ja_to_en": "Translate the following Japanese text to English. Output only the translation.\n\n{text}",
-        "translate_en_to_ko": "Translate the following English text to Korean. Output only the translation.\n\n{text}",
-        "translate_ko_to_en": "Translate the following Korean text to English. Output only the translation.\n\n{text}",
+        "translate": "Translate from {source} to {target}:\n{text}\n=",
+        "translate_zh_to_en": "中文翻译英文：\n{text}\n=",
+        "translate_en_to_zh": "英文翻译中文：\n{text}\n=",
+        "translate_zh_to_ja": "中文翻译日文：\n{text}\n=",
+        "translate_ja_to_zh": "日文翻译中文：\n{text}\n=",
+        "translate_zh_to_ko": "中文翻译韩文：\n{text}\n=",
+        "translate_ko_to_zh": "韩文翻译中文：\n{text}\n=",
+        "translate_en_to_ja": "English to Japanese:\n{text}\n=",
+        "translate_ja_to_en": "Japanese to English:\n{text}\n=",
+        "translate_en_to_ko": "English to Korean:\n{text}\n=",
+        "translate_ko_to_en": "Korean to English:\n{text}\n=",
     }
 
     def __init__(
@@ -150,12 +151,16 @@ class HyMT2Translator:
             device = next(self._model.parameters()).device
             inputs = {k: v.to(device) for k, v in inputs.items()}
 
+            # 获取 eos_token_id 用于提前停止
+            eos_token_id = self._tokenizer.eos_token_id
+
             gen_kwargs = {
-                "max_new_tokens": config.TRANSLATION_MAX_NEW_TOKENS,
-                "do_sample": False,  # 贪心解码，翻译更稳定
-                "pad_token_id": self._tokenizer.eos_token_id,
-                "repetition_penalty": 1.15,  # 避免重复输出
-                "no_repeat_ngram_size": 3,   # 禁止 3-gram 重复
+                "max_new_tokens": 256,  # 限制生成长度，避免续写
+                "do_sample": False,     # 贪心解码，翻译更稳定
+                "pad_token_id": eos_token_id,
+                "eos_token_id": eos_token_id,
+                "repetition_penalty": 1.2,
+                "no_repeat_ngram_size": 3,
             }
 
             with torch.no_grad():
@@ -166,7 +171,7 @@ class HyMT2Translator:
             result = self._tokenizer.decode(new_tokens, skip_special_tokens=True)
 
             # 清理结果
-            result = self._clean_translation(result)
+            result = self._clean_translation(result, source_lang, target_lang)
 
             return result
 
@@ -174,33 +179,71 @@ class HyMT2Translator:
             logger.error(f"翻译失败: {e}")
             return ""
 
-    def _clean_translation(self, text: str) -> str:
-        """清理翻译结果，去除模型生成的噪音"""
+    def _clean_translation(self, text: str, source_lang: str = None, target_lang: str = None) -> str:
+        """清理翻译结果，去除续写内容和噪音"""
         if not text:
             return ""
 
         # 去除首尾空白
         text = text.strip()
 
-        # 取第一行（模型有时会生成多行）
-        text = text.split("\n")[0].strip()
-
-        # 去除常见的 prompt 残留
-        for prefix in ["翻译：", "Translation:", "译文：", "输出：", "Output:", "答案："]:
+        # 去除 prompt 残留标记
+        for prefix in ["=", "翻译：", "Translation:", "译文：", "输出：", "Output:", "答案："]:
             if text.startswith(prefix):
                 text = text[len(prefix):].strip()
 
-        # 去除引号包裹
-        if len(text) >= 2 and text[0] in ('"', '"', '「') and text[-1] in ('"', '"', '」'):
-            text = text[1:-1].strip()
+        # 按换行分割，取第一行（续写通常在第二行开始）
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        if lines:
+            text = lines[0]
 
-        # 过滤明显的垃圾输出（全是重复字符）
+        # 检测续写：如果文本中出现源语言的常见续写标记，截断
+        continuation_markers = [
+            "。", "！", "？",  # 中文句子结束（如果目标是英文）
+            ".", "!", "?",     # 英文句子结束
+            "\n",
+            "翻译", "Translation", "译文", "注", "Note", "解释",
+            "原文", "Source", "原文是",
+        ]
+
+        # 如果目标语言是英文，中文句号可能是续写的开始
+        if target_lang == "en" and source_lang == "zh":
+            for marker in ["。", "！", "？"]:
+                idx = text.find(marker)
+                if idx > 0 and idx < len(text) - 1:
+                    text = text[:idx].strip()
+
+        # 如果目标语言是中文，英文句号可能是续写的开始
+        if target_lang == "zh" and source_lang == "en":
+            for marker in [".", "!", "?"]:
+                idx = text.find(marker)
+                if idx > 0 and idx < len(text) - 1:
+                    # 检查句号后面是否有更多文本（可能是续写）
+                    after = text[idx+1:].strip()
+                    if after and len(after) > 5:
+                        text = text[:idx+1].strip()
+
+        # 去除引号包裹
+        if len(text) >= 2:
+            if (text[0] in ('"', '"', '「', '『', '"') and text[-1] in ('"', '"', '」', '』', '"')):
+                text = text[1:-1].strip()
+            elif (text[0] == '(' and text[-1] == ')'):
+                text = text[1:-1].strip()
+
+        # 过滤垃圾输出
         if len(text) > 3 and len(set(text)) <= 2:
             return ""
 
-        # 过滤太短的无意义输出
         if len(text) <= 1:
             return ""
+
+        # 过滤明显的非翻译内容（模型输出了源语言而非目标语言）
+        # 这是一个简单的启发式检查
+        if target_lang == "en" and source_lang == "zh":
+            # 如果输出大部分是中文，可能是续写而非翻译
+            chinese_chars = sum(1 for c in text if '一' <= c <= '鿿')
+            if chinese_chars > len(text) * 0.5 and len(text) > 5:
+                return ""  # 丢弃，等待下一个有效翻译
 
         return text
 
