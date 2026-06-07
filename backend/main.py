@@ -6,6 +6,7 @@ WebSocket 端点：接收音频流 → ASR → 翻译 → 返回结果
 import asyncio
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +32,9 @@ app = FastAPI(title="实时语音翻译", version="1.0.0")
 asr_engine: Optional[ASREngine] = None
 translator: Optional[HyMT2Translator] = None
 audio_processor = AudioProcessor()
+
+# 线程池：ASR 和翻译是 CPU 密集型，放到线程池避免阻塞事件循环
+executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="model")
 
 
 def get_asr_engine(engine_name: str = None) -> ASREngine:
@@ -244,6 +248,12 @@ async def websocket_translate(websocket: WebSocket):
     # 上一次识别的文本，用于去重
     last_recognized_text = ""
 
+    # 翻译缓存：相同文本不重复翻译
+    translation_cache: dict[str, str] = {}
+
+    # 是否正在处理中（跳过堆积的音频）
+    processing = False
+
     try:
         while True:
             message = await websocket.receive()
@@ -313,42 +323,75 @@ async def websocket_translate(websocket: WebSocket):
                         await websocket.send_json({"type": "error", "message": "解码器启动失败"})
                     continue
 
+                # 如果上一轮还在处理，跳过这个 chunk（避免堆积延迟）
+                if processing:
+                    decoder.write(audio_bytes)  # 写入但不读取
+                    continue
+
                 # 音频 Cluster 数据 → 写入解码器
                 decoder.write(audio_bytes)
 
-                # 等待一小段时间让 ffmpeg 产生输出
-                await asyncio.sleep(0.15)
+                # 等待 ffmpeg 输出
+                await asyncio.sleep(0.1)
 
                 # 读取 PCM
                 audio_data = decoder.read_pcm()
                 if len(audio_data) == 0:
                     continue
 
+                processing = True
+
                 try:
                     if asr_engine is None or not asr_engine.is_loaded():
                         await websocket.send_json({"type": "error", "message": "ASR 引擎未就绪"})
+                        processing = False
                         continue
 
-                    recognized_text = asr_engine.transcribe(
-                        audio_data, sample_rate=config.AUDIO_SAMPLE_RATE, language=source_lang,
+                    # ASR 放到线程池（不阻塞事件循环）
+                    loop = asyncio.get_event_loop()
+                    start_time = time.time()
+                    recognized_text = await loop.run_in_executor(
+                        executor,
+                        lambda: asr_engine.transcribe(
+                            audio_data, sample_rate=config.AUDIO_SAMPLE_RATE, language=source_lang,
+                        ),
                     )
 
                     if not recognized_text:
+                        processing = False
                         continue
 
                     # 去重
                     if recognized_text == last_recognized_text:
+                        processing = False
                         continue
                     last_recognized_text = recognized_text
 
                     if translator is None or not translator.is_loaded():
                         await websocket.send_json({"type": "error", "message": "翻译模型未就绪"})
+                        processing = False
                         continue
 
-                    start_time = time.time()
-                    translated_text = translator.translate(
-                        recognized_text, source_lang=source_lang, target_lang=target_lang,
-                    )
+                    # 检查翻译缓存
+                    cache_key = f"{source_lang}:{target_lang}:{recognized_text}"
+                    if cache_key in translation_cache:
+                        translated_text = translation_cache[cache_key]
+                    else:
+                        # 翻译也放到线程池
+                        translated_text = await loop.run_in_executor(
+                            executor,
+                            lambda: translator.translate(
+                                recognized_text, source_lang=source_lang, target_lang=target_lang,
+                            ),
+                        )
+                        translation_cache[cache_key] = translated_text
+                        # 缓存大小限制
+                        if len(translation_cache) > 500:
+                            # 删除最旧的一半
+                            keys = list(translation_cache.keys())
+                            for k in keys[:len(keys)//2]:
+                                del translation_cache[k]
+
                     latency = (time.time() - start_time) * 1000
 
                     await websocket.send_json({
@@ -365,8 +408,10 @@ async def websocket_translate(websocket: WebSocket):
                 except Exception as e:
                     err_str = str(e)
                     if "close message" in err_str or "disconnect" in err_str.lower():
-                        break  # WebSocket 已关闭，退出循环
+                        break
                     logger.error(f"处理音频失败: {e}")
+                finally:
+                    processing = False
 
     except WebSocketDisconnect:
         logger.info("WebSocket 客户端已断开")
