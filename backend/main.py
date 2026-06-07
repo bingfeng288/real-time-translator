@@ -363,12 +363,17 @@ async def websocket_translate(websocket: WebSocket):
                     logger.info(f"[{source_lang}→{target_lang}] {recognized_text} => {translated_text} ({latency:.0f}ms)")
 
                 except Exception as e:
+                    err_str = str(e)
+                    if "close message" in err_str or "disconnect" in err_str.lower():
+                        break  # WebSocket 已关闭，退出循环
                     logger.error(f"处理音频失败: {e}")
 
     except WebSocketDisconnect:
         logger.info("WebSocket 客户端已断开")
     except Exception as e:
-        logger.error(f"WebSocket 错误: {e}")
+        err_str = str(e)
+        if "close message" not in err_str:
+            logger.error(f"WebSocket 错误: {e}")
     finally:
         audio_processor.remove_decoder(client_id)
 

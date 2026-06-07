@@ -191,9 +191,20 @@
     }
 
     async function startRecording() {
+        // 确保 WebSocket 连接
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            connect();
+            await new Promise((resolve) => {
+                const check = () => {
+                    if (ws && ws.readyState === WebSocket.OPEN) resolve();
+                    else setTimeout(check, 100);
+                };
+                setTimeout(check, 100);
+            });
+        }
+
         const ok = await recorder.start();
         if (!ok) {
-            // 用户取消选择屏幕时静默处理，其他错误已在 recorder.onError 中 showToast
             return;
         }
 
