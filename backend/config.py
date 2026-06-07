@@ -70,7 +70,7 @@ DEFAULT_TARGET_LANG = "en"
 
 # 翻译生成参数
 TRANSLATION_MAX_NEW_TOKENS = 512
-TRANSLATION_TEMPERATURE = 0.1
+TRANSLATION_TEMPERATURE = None  # 不设置 temperature，避免警告
 TRANSLATION_DO_SAMPLE = False
 
 # ============================================================

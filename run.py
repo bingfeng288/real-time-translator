@@ -18,5 +18,5 @@ if __name__ == "__main__":
         host=HOST,
         port=PORT,
         reload=False,
-        log_level="debug",
+        log_level="info",
     )

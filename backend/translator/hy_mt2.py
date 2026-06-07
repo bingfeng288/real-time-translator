@@ -144,14 +144,16 @@ class HyMT2Translator:
             device = next(self._model.parameters()).device
             inputs = {k: v.to(device) for k, v in inputs.items()}
 
+            gen_kwargs = {
+                "max_new_tokens": config.TRANSLATION_MAX_NEW_TOKENS,
+                "do_sample": config.TRANSLATION_DO_SAMPLE,
+                "pad_token_id": self._tokenizer.eos_token_id,
+            }
+            if config.TRANSLATION_TEMPERATURE is not None:
+                gen_kwargs["temperature"] = config.TRANSLATION_TEMPERATURE
+
             with torch.no_grad():
-                outputs = self._model.generate(
-                    **inputs,
-                    max_new_tokens=config.TRANSLATION_MAX_NEW_TOKENS,
-                    temperature=config.TRANSLATION_TEMPERATURE,
-                    do_sample=config.TRANSLATION_DO_SAMPLE,
-                    pad_token_id=self._tokenizer.eos_token_id,
-                )
+                outputs = self._model.generate(**inputs, **gen_kwargs)
 
             # 只取新生成的 token
             new_tokens = outputs[0][inputs["input_ids"].shape[-1]:]
