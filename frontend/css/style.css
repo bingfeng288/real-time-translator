@@ -383,6 +383,8 @@ body {
     overflow-y: auto;
     border: 1px solid var(--border);
     margin-bottom: 16px;
+    display: flex;
+    flex-direction: column;
 }
 
 .subtitle-header {
@@ -494,7 +496,7 @@ body {
 @keyframes slideIn {
     from {
         opacity: 0;
-        transform: translateY(10px);
+        transform: translateY(-10px);
     }
     to {
         opacity: 1;

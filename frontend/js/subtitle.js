@@ -53,7 +53,7 @@ class SubtitleManager {
     }
 
     /**
-     * 渲染主页面字幕
+     * 渲染主页面字幕（新内容插入到最上方）
      */
     _renderItem(item) {
         const div = document.createElement('div');
@@ -75,11 +75,16 @@ class SubtitleManager {
             </div>
         `;
 
-        this.container.appendChild(div);
+        // 插入到占位文字之后（即最上方）
+        if (this.placeholder && this.placeholder.nextSibling) {
+            this.container.insertBefore(div, this.placeholder.nextSibling);
+        } else {
+            this.container.appendChild(div);
+        }
     }
 
     /**
-     * 渲染画中画窗口字幕
+     * 渲染画中画窗口字幕（新内容插入到最上方）
      */
     _renderPipItem(item) {
         if (!this._pipContainer) return;
@@ -97,8 +102,12 @@ class SubtitleManager {
             <div class="pip-translated">${this._escapeHtml(item.translated)}</div>
         `;
 
-        this._pipContainer.appendChild(div);
-        this._pipContainer.scrollTop = this._pipContainer.scrollHeight;
+        // 插入到最上方
+        if (this._pipContainer.firstChild) {
+            this._pipContainer.insertBefore(div, this._pipContainer.firstChild);
+        } else {
+            this._pipContainer.appendChild(div);
+        }
     }
 
     // ============================================================
@@ -291,7 +300,8 @@ class SubtitleManager {
     }
 
     _scrollToBottom() {
-        this.container.scrollTop = this.container.scrollHeight;
+        // 新内容在最上方，滚动到顶部
+        this.container.scrollTop = 0;
     }
 
     _escapeHtml(text) {
