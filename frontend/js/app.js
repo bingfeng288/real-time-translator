@@ -499,6 +499,20 @@
     elements.sourceMic.addEventListener('click', () => switchAudioSource('microphone'));
     elements.sourceSystem.addEventListener('click', () => switchAudioSource('system'));
 
+    // 画中画按钮
+    const pipBtn = document.getElementById('pipBtn');
+    if (pipBtn) {
+        pipBtn.addEventListener('click', async () => {
+            try {
+                const isOpen = await subtitleManager.togglePip();
+                pipBtn.classList.toggle('active', isOpen);
+                pipBtn.querySelector('.pip-label').textContent = isOpen ? '关闭画中画' : '画中画';
+            } catch (err) {
+                showToast(err.message, 'error');
+            }
+        });
+    }
+
     // ============================================================
     // 启动
     // ============================================================
